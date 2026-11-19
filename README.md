@@ -111,3 +111,9 @@ public/admin/   interface PC
 public/shared/  utilitaires communs
 catalog/        catalogue Bormann Pro (données + photos)
 ```
+
+## Démonstration sans serveur
+
+`node scripts/build-demo.js` construit dans `demo/dist/` une version autonome de l'application mobile : mêmes écrans,
+catalogue et clients de démonstration, données gardées dans le navigateur. Le scan par caméra y est remplacé par des
+scans simulés, et les commandes ne sont envoyées nulle part.

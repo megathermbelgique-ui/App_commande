@@ -54,6 +54,28 @@ const fail = (e) => {
   toast(e.message || 'Erreur', 'err');
 };
 
+// Confirmation intégrée à l'application (les boîtes de dialogue du navigateur ne sont pas toujours disponibles).
+function ask(text, okLabel = 'Confirmer') {
+  return new Promise((resolve) => {
+    const done = (v) => { wrap.remove(); resolve(v); };
+    const wrap = h('div', { class: 'sheet-wrap' },
+      h('div', { class: 'sheet', role: 'alertdialog', 'aria-label': text },
+        h('p', { class: 'ask' }, text),
+        h('div', { class: 'sheet-actions' },
+          h('button', { class: 'btn', onclick: () => done(false) }, 'Annuler'),
+          h('button', { class: 'btn primary', onclick: () => done(true) }, okLabel))));
+    $layer.append(wrap);
+  });
+}
+
+// Photo d'article (en démo, les photos sont chargées par paquets).
+function photo(url, attrs) {
+  const img = h('img', attrs);
+  if (window.__resolveImage) window.__resolveImage(url).then((src) => { if (src) img.src = src; });
+  else img.src = url;
+  return img;
+}
+
 function updateBadge() {
   const badge = document.getElementById('badge');
   if (!badge) return;
@@ -93,7 +115,7 @@ function header(title, { back } = {}) {
   $top.hidden = false;
   $top.replaceChildren(
     h('div', { class: 'left' },
-      back ? h('button', { class: 'iconbtn', 'aria-label': 'Retour', onclick: () => (typeof back === 'string' ? go(back) : history.back()) }, icon('back')) : null,
+      back ? h('button', { class: 'iconbtn', 'aria-label': 'Retour', onclick: () => (typeof back === 'string' ? go(back) : goBack()) }, icon('back')) : null,
       h('button', { class: 'iconbtn', id: 'cartbtn', 'aria-label': 'Panier', onclick: () => go('/panier') },
         icon('cart', 26), h('span', { id: 'badge', class: 'badge', hidden: true }))
     ),
@@ -116,7 +138,25 @@ function searchBar(placeholder, value, oninput) {
 }
 
 // ---------- Navigation ----------
+// En démo (page de démonstration sans serveur), la navigation reste en mémoire.
+const DEMO = !!window.__DEMO__;
+const trail = ['/'];
+const currentPath = () => (DEMO ? trail[trail.length - 1] : location.hash.slice(1) || '/');
+const goBack = () => {
+  if (!DEMO) return history.back();
+  if (trail.length > 1) trail.pop();
+  route();
+};
+const replacePath = (path) => {
+  if (!DEMO) return location.replace('#' + path);
+  trail[trail.length - 1] = path;
+  route();
+};
 const go = (path) => {
+  if (DEMO) {
+    if (currentPath() !== path) trail.push(path);
+    return route();
+  }
   if (location.hash === '#' + path) route();
   else location.hash = path;
 };
@@ -143,7 +183,7 @@ function route() {
   }
   $layer.querySelectorAll('.sheet-wrap').forEach((s) => s.remove());
   if (!state.user) return showLogin();
-  const path = location.hash.slice(1) || '/';
+  const path = currentPath();
   $view.className = '';
   $view.scrollTop = 0;
   for (const [re, fn] of routes) {
@@ -185,7 +225,9 @@ function showLogin() {
       field("Nom d'utilisateur", username),
       field('Mot de passe', password),
       error, btn,
-      h('p', { class: 'hint' }, 'Vous resterez connecté sur cet appareil.'))
+      h('p', { class: 'hint' }, DEMO
+        ? 'Démonstration : entrez n\'importe quel nom et mot de passe. Les données restent sur cet appareil.'
+        : 'Vous resterez connecté sur cet appareil.'))
   );
 }
 
@@ -360,6 +402,14 @@ function scanView() {
       if (busy) s.pause();
     },
     (e) => {
+      if (DEMO) {
+        // Pas de caméra dans la page de démonstration : on simule la lecture d'un code-barres.
+        message.classList.add('demo');
+        message.replaceChildren(h('b', {}, 'Démo : la caméra est remplacée par des scans simulés.'),
+          h('div', { class: 'chips' }, (window.__DEMO__.scans || []).map((x) =>
+            h('button', { class: 'chipbtn', onclick: () => lookup(x.code) }, icon('scan', 16), x.label))));
+        return;
+      }
       message.textContent = e.message + ' Vous pouvez saisir le code ci-dessous.';
       message.classList.add('err');
     }
@@ -443,18 +493,18 @@ function cartView() {
       note,
       send,
       h('button', { class: 'btn ghost', onclick: () => go('/scan') }, icon('scan', 18), 'Continuer à scanner'),
-      h('button', { class: 'btn ghost danger', onclick: () => { if (confirm('Vider le panier ?')) { setCart([]); refresh(); } } }, icon('trash', 18), 'Vider le panier')
+      h('button', { class: 'btn ghost danger', onclick: () => { ask('Vider le panier ?', 'Vider').then((ok) => { if (ok) { setCart([]); refresh(); } }); } }, icon('trash', 18), 'Vider le panier')
     );
 
     async function submit() {
-      if (!confirm(`Envoyer la commande pour ${state.client.name} ?\nTotal : ${eur(quote.totalCents)} HT`)) return;
+      if (!(await ask(`Envoyer la commande pour ${state.client.name} ?\nTotal : ${eur(quote.totalCents)} HT`, 'Envoyer'))) return;
       send.disabled = true;
       try {
         const { order } = await api('/orders', { method: 'POST', body: { clientId: state.client.id, lines: getCart(), note: note.value } });
         setCart([]);
         store.set(cartKey() + ':note', '');
         toast(`Commande ${order.number} envoyée`);
-        location.replace('#/commande/' + order.id);
+        replacePath('/commande/' + order.id);
       } catch (e) {
         send.disabled = false;
         fail(e);
@@ -469,7 +519,7 @@ function cartView() {
 let catalogueQuery = '';
 function productRow(p) {
   return h('button', { class: 'row', onclick: () => go(`/produit/${p.id}`) },
-    h('div', { class: 'thumb' }, p.imageUrl ? h('img', { src: p.imageUrl, alt: '', loading: 'lazy' }) : icon('box', 26)),
+    h('div', { class: 'thumb' }, p.imageUrl ? photo(p.imageUrl, { alt: '', loading: 'lazy' }) : icon('box', 26)),
     h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.code ? ' · ' + p.code : ''}`)),
     p.priceCents != null ? h('span', { class: 'price' }, eur(p.priceCents)) : null);
 }
@@ -521,7 +571,7 @@ async function productView(id) {
   }
   const p = product;
   $view.replaceChildren(h('div', { class: 'pad product' },
-    p.imageUrl ? h('img', { class: 'hero', src: p.imageUrl, alt: p.name }) : h('div', { class: 'hero ph' }, icon('box', 64)),
+    p.imageUrl ? photo(p.imageUrl, { class: 'hero', alt: p.name }) : h('div', { class: 'hero ph' }, icon('box', 64)),
     h('h2', {}, p.name),
     h('p', { class: 'muted' }, [`Réf. ${p.ref}`, p.code && `Code ${p.code}`, p.category].filter(Boolean).join(' · ')),
     p.promos.map((x) => h('div', { class: 'promo-line' }, icon('tag', 16),
@@ -654,7 +704,7 @@ async function clientForm(id) {
       const r = await api(id ? `/clients/${id}` : '/clients', { method: id ? 'PUT' : 'POST', body });
       if (state.client?.id === r.client.id) setClient(r.client);
       toast('Client enregistré');
-      location.replace('#/client/' + r.client.id);
+      replacePath('/client/' + r.client.id);
     } catch (err) {
       error.textContent = err.message;
       save.disabled = false;
@@ -719,7 +769,7 @@ function accountView() {
     state.client ? h('div', { class: 'card' }, h('h3', {}, 'Client en cours'), h('p', {}, state.client.name),
       h('button', { class: 'btn ghost', onclick: () => { setClient(null); accountView(); } }, 'Changer de client')) : null,
     h('button', { class: 'btn ghost danger', onclick: async () => {
-      if (!confirm('Se déconnecter ?')) return;
+      if (!(await ask('Se déconnecter ?', 'Se déconnecter'))) return;
       await api('/logout', { method: 'POST' }).catch(() => {});
       showLogin();
     } }, 'Se déconnecter')));
@@ -727,7 +777,7 @@ function accountView() {
 
 // ---------- Démarrage ----------
 (async function start() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  if (!DEMO && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   try {
     state.user = (await api('/me')).user;
   } catch {
