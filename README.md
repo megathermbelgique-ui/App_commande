@@ -22,8 +22,13 @@ ADMIN_PASSWORD="un-mot-de-passe-solide" npm start
 - Compte créé au premier démarrage : `admin` + le mot de passe choisi. Sans `ADMIN_PASSWORD`,
   un mot de passe aléatoire est affiché une seule fois dans la console.
 
-Au premier démarrage, un **catalogue de démonstration** est chargé (30 articles, 4 clients et
-3 promos fictifs, références `DEMO-…`). Pour démarrer avec une base vide : `SEED_DEMO=0`.
+Au premier démarrage, la base est remplie avec :
+
+- le **catalogue Bormann Pro** (`catalog/`) : 969 articles tirés de la brochure automne-hiver 2026, avec référence,
+  code article, nom et fiche technique en français, et photo pour 807 d'entre eux. La brochure ne contient
+  **ni prix ni codes-barres** : ces articles ne sont commandables qu'une fois leur prix saisi (voir plus bas) ;
+- des **données de démonstration** : 30 articles fictifs avec prix (catégorie « Démonstration »), 4 clients et 3 promos,
+  pour essayer le scan et la commande. `SEED_DEMO=0` pour ne pas les charger, `SEED_CATALOG=0` pour une base sans catalogue.
 
 Les délégués se créent dans l'interface PC, onglet **Utilisateurs**.
 
@@ -57,19 +62,24 @@ docker run -d -p 3000:3000 -v commandes-data:/data -e ADMIN_PASSWORD="…" comma
 Le dossier de données (`/data` dans Docker) doit être **persistant** : il contient toute la base
 (`commandes.db`). Le sauvegarder régulièrement.
 
-## Charger le vrai catalogue
+## Saisir les prix et les codes-barres
 
-Interface PC → **Articles et prix** → **Importer un CSV** (le bouton « Format CSV » donne un modèle).
-Une ligne par article et par conditionnement :
+Interface PC → **Articles et prix** :
+
+1. **Exporter en CSV** : le fichier contient tous les articles, une ligne par conditionnement.
+2. Dans Excel, remplir les colonnes `prix` (HT, pour le conditionnement entier) et `ean` (code-barres).
+   Pour ajouter une boîte, un carton ou une palette, dupliquer la ligne et changer `unite` (`piece`, `boite`, `carton`, `palette`) et `qte`.
+3. **Importer un CSV** : les articles existants sont mis à jour ; une ligne sans prix est ignorée sans erreur.
 
 ```
-ref;nom;categorie;description;unite;qte;prix;ean;caracteristiques
-ABC123;Tournevis plat 5,5 x 100;Tournevis;Lame Cr-V;piece;1;3,90;5200000000011;Empreinte: Plate | Longueur: 100 mm
-ABC123;;;;boite;10;37,00;5200000000028;
+ref;code;nom;categorie;unite;qte;prix;ean
+BBP5123;070474;Clé à chocs 20V brushless solo;Outillage sans fil;piece;1;89,00;5200000000011
+BBP5123;;;;carton;4;330,00;5200000000028
 ```
 
-`unite` vaut `piece`, `boite`, `carton` ou `palette` ; `prix` est le prix HT du conditionnement entier ;
-`ean` est le code-barres de ce conditionnement. Réimporter un fichier met à jour les articles existants.
+Un article se modifie aussi un par un en cliquant dessus. Le bouton « Format CSV » décrit toutes les colonnes
+(description, caractéristiques, photo). Dans l'application, un article se retrouve par sa référence, son code article
+ou son code-barres.
 
 ## Règles de prix
 
@@ -99,4 +109,5 @@ server/   API (Express), base SQLite, prix, PDF
 public/app/     application mobile
 public/admin/   interface PC
 public/shared/  utilitaires communs
+catalog/        catalogue Bormann Pro (données + photos)
 ```
