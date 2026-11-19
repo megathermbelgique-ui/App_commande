@@ -1,0 +1,19 @@
+{
+  "name": "app-commande",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Prise de commandes Bormann Tools : application mobile (PWA), serveur et interface d'administration PC",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@zxing/library": "^0.21.3",
+    "express": "^5.3.0",
+    "pdfkit": "^0.20.2"
+  }
+}

@@ -1,0 +1,737 @@
+import { h, api, eur, frDate, frDay, pctText, icon, debounce } from '/shared/ui.js';
+import { startScanner } from '/scanner.js';
+
+const $top = document.getElementById('top');
+const $view = document.getElementById('view');
+const $layer = document.getElementById('layer');
+
+// ---------- État local (conservé sur l'appareil) ----------
+const store = {
+  get(key, fallback) {
+    try {
+      return JSON.parse(localStorage.getItem(key)) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  },
+  set(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
+  },
+};
+const state = { user: null, client: store.get('client', null) };
+let cleanup = null; // fonction appelée en quittant l'écran courant (arrêt caméra…)
+
+const setClient = (c) => {
+  state.client = c ? { id: c.id, name: c.name, number: c.number, vat: c.vat } : null;
+  store.set('client', state.client);
+  updateBadge();
+};
+const cartKey = () => `cart:${state.client?.id}`;
+const getCart = () => (state.client ? store.get(cartKey(), []) : []);
+const setCart = (lines) => {
+  store.set(cartKey(), lines);
+  updateBadge();
+};
+function addToCart(product, unit, qty) {
+  const lines = getCart();
+  const found = lines.find((l) => l.productId === product.id && l.unit === unit);
+  if (found) found.qty += qty;
+  else lines.push({ productId: product.id, unit, qty });
+  setCart(lines);
+}
+
+// ---------- Éléments d'interface ----------
+function toast(text, kind = 'ok') {
+  const el = h('div', { class: `toast ${kind}`, role: 'status' }, kind === 'ok' ? icon('check', 20) : null, text);
+  $layer.append(el);
+  setTimeout(() => el.classList.add('out'), kind === 'ok' ? 1100 : 2600);
+  setTimeout(() => el.remove(), kind === 'ok' ? 1400 : 2900);
+}
+const fail = (e) => {
+  if (e.status === 401) return showLogin();
+  toast(e.message || 'Erreur', 'err');
+};
+
+function updateBadge() {
+  const badge = document.getElementById('badge');
+  if (!badge) return;
+  const n = getCart().length;
+  badge.textContent = n;
+  badge.hidden = n === 0;
+}
+
+// Animation « colis qui part dans le panier »
+function flyToCart(fromEl) {
+  const cart = document.getElementById('cartbtn');
+  if (!cart || !fromEl) return;
+  const a = fromEl.getBoundingClientRect();
+  const b = cart.getBoundingClientRect();
+  const box = h('div', { class: 'flybox' }, icon('box', 30));
+  const x0 = a.left + a.width / 2 - 22;
+  const y0 = a.top + a.height / 2 - 22;
+  box.style.left = x0 + 'px';
+  box.style.top = y0 + 'px';
+  $layer.append(box);
+  const dx = b.left + b.width / 2 - 22 - x0;
+  const dy = b.top + b.height / 2 - 22 - y0;
+  box.animate(
+    [
+      { transform: 'translate(0,0) scale(1)', opacity: 1 },
+      { transform: `translate(${dx * 0.5}px, ${dy * 0.75 - 60}px) scale(.8)`, opacity: 1, offset: 0.55 },
+      { transform: `translate(${dx}px, ${dy}px) scale(.25)`, opacity: 0.6 },
+    ],
+    { duration: 650, easing: 'cubic-bezier(.4,.1,.6,1)' }
+  ).onfinish = () => {
+    box.remove();
+    cart.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.35)' }, { transform: 'scale(1)' }], 300);
+  };
+}
+
+function header(title, { back } = {}) {
+  $top.hidden = false;
+  $top.replaceChildren(
+    h('div', { class: 'left' },
+      back ? h('button', { class: 'iconbtn', 'aria-label': 'Retour', onclick: () => (typeof back === 'string' ? go(back) : history.back()) }, icon('back')) : null,
+      h('button', { class: 'iconbtn', id: 'cartbtn', 'aria-label': 'Panier', onclick: () => go('/panier') },
+        icon('cart', 26), h('span', { id: 'badge', class: 'badge', hidden: true }))
+    ),
+    h('h1', {}, title),
+    h('div', { class: 'right' },
+      h('button', { class: 'iconbtn', 'aria-label': 'Mon compte', onclick: () => go('/compte') }, icon('user', 26)))
+  );
+  updateBadge();
+}
+
+const loading = () => h('div', { class: 'loading' }, 'Chargement…');
+const empty = (text) => h('div', { class: 'empty' }, text);
+const field = (label, input) => h('label', { class: 'field' }, h('span', {}, label), input);
+const statusChip = (o) => h('span', { class: `chip st-${o.status}` }, o.statusLabel);
+
+function searchBar(placeholder, value, oninput) {
+  return h('div', { class: 'search' }, icon('search', 20),
+    h('input', { type: 'search', placeholder, value, autocomplete: 'off', autocapitalize: 'off',
+      autocorrect: 'off', enterkeyhint: 'search', oninput: (e) => oninput(e.target.value) }));
+}
+
+// ---------- Navigation ----------
+const go = (path) => {
+  if (location.hash === '#' + path) route();
+  else location.hash = path;
+};
+const routes = [
+  [/^\/$/, home],
+  [/^\/scan$/, scanView],
+  [/^\/panier$/, cartView],
+  [/^\/catalogue$/, catalogueView],
+  [/^\/catalogue\/(\d+)$/, catalogueView],
+  [/^\/produit\/(\d+)$/, productView],
+  [/^\/commandes$/, ordersView],
+  [/^\/commande\/(\d+)$/, orderView],
+  [/^\/clients$/, clientsView],
+  [/^\/client\/nouveau$/, clientForm],
+  [/^\/client\/(\d+)$/, clientView],
+  [/^\/client\/(\d+)\/modifier$/, clientForm],
+  [/^\/promos$/, promosView],
+  [/^\/compte$/, accountView],
+];
+function route() {
+  if (cleanup) {
+    cleanup();
+    cleanup = null;
+  }
+  $layer.querySelectorAll('.sheet-wrap').forEach((s) => s.remove());
+  if (!state.user) return showLogin();
+  const path = location.hash.slice(1) || '/';
+  $view.className = '';
+  $view.scrollTop = 0;
+  for (const [re, fn] of routes) {
+    const m = path.match(re);
+    if (m) return fn(...m.slice(1).map(Number));
+  }
+  go('/');
+}
+window.addEventListener('hashchange', route);
+
+// ---------- Connexion ----------
+function showLogin() {
+  state.user = null;
+  $top.hidden = true;
+  $view.className = 'login';
+  const error = h('p', { class: 'error', role: 'alert' });
+  const username = h('input', { type: 'text', autocomplete: 'username', autocapitalize: 'off', autocorrect: 'off', required: true });
+  const password = h('input', { type: 'password', autocomplete: 'current-password', required: true });
+  const btn = h('button', { class: 'btn primary big', type: 'submit' }, 'Se connecter');
+  $view.replaceChildren(
+    h('form', {
+      class: 'logincard',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        btn.disabled = true;
+        error.textContent = '';
+        try {
+          const r = await api('/login', { method: 'POST', body: { username: username.value, password: password.value } });
+          state.user = r.user;
+          route();
+        } catch (err) {
+          error.textContent = err.message;
+          btn.disabled = false;
+        }
+      },
+    },
+      h('div', { class: 'logo' }, icon('box', 44)),
+      h('h1', {}, 'Commandes Bormann'),
+      field("Nom d'utilisateur", username),
+      field('Mot de passe', password),
+      error, btn,
+      h('p', { class: 'hint' }, 'Vous resterez connecté sur cet appareil.'))
+  );
+}
+
+// ---------- Accueil ----------
+function home() {
+  header('Commandes');
+  const tile = (path, name, label, sub, cls = '') =>
+    h('button', { class: `tile ${cls}`, onclick: () => go(path) }, icon(name, 40), h('b', {}, label), h('small', {}, sub));
+  $view.replaceChildren(
+    h('div', { class: 'pad' },
+      state.client
+        ? h('button', { class: 'clientbar', onclick: () => go(`/client/${state.client.id}`) },
+            h('span', {}, 'Client en cours'), h('b', {}, state.client.name), icon('chevron', 18))
+        : null,
+      h('div', { class: 'tiles' },
+        tile('/scan', 'scan', 'Scan', 'Scanner des codes-barres', 'wide accent'),
+        tile('/catalogue', 'book', 'Catalogue', 'Articles et catégories'),
+        tile('/commandes', 'list', 'Commandes passées', 'Suivi et statuts'),
+        tile('/clients', 'people', 'Clients', 'Fiches et nouveaux clients'),
+        tile('/promos', 'tag', 'Promos', 'Offres du moment')))
+  );
+}
+
+// ---------- Sélection d'un client ----------
+function clientPicker(onPick, title = 'Sélectionnez un client') {
+  const list = h('div', { class: 'rows' }, loading());
+  const load = debounce(async (query) => {
+    try {
+      const { clients } = await api('/clients?q=' + encodeURIComponent(query));
+      list.replaceChildren(
+        ...(clients.length
+          ? clients.map((c) =>
+              h('button', { class: 'row', onclick: () => onPick(c) },
+                h('div', { class: 'grow' }, h('b', {}, c.name),
+                  h('small', {}, [c.number, c.vat, [c.hq_zip, c.hq_city].filter(Boolean).join(' ')].filter(Boolean).join(' · '))),
+                icon('chevron', 18)))
+          : [empty('Aucun client trouvé.')])
+      );
+    } catch (e) {
+      fail(e);
+    }
+  }, 200);
+  load('');
+  return h('div', { class: 'pad' },
+    h('h2', {}, title),
+    searchBar('Nom, n° de TVA, n° client, ville…', '', load),
+    list,
+    h('button', { class: 'btn ghost', onclick: () => go('/client/nouveau') }, icon('plus', 18), 'Nouveau client'));
+}
+
+// ---------- Fenêtre « quantité × conditionnement » ----------
+function openAddSheet(product, presetUnit, onClose = () => {}) {
+  let qty = 1;
+  const units = product.units;
+  if (!units.length) {
+    toast("Cet article n'a pas de prix défini.", 'err');
+    return onClose();
+  }
+  const unitLabel = (u) => (u.qty > 1 ? `${u.label} ×${u.qty}` : u.label);
+  const select = h('select', { 'aria-label': 'Conditionnement', onchange: refresh },
+    units.map((u) => h('option', { value: u.unit, selected: u.unit === presetUnit }, `${unitLabel(u)} — ${eur(u.netCents)}`)));
+  const input = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: 1, 'aria-label': 'Quantité',
+    oninput: () => { qty = Math.max(0, Math.floor(Number(input.value)) || 0); refresh(false); },
+    onblur: () => { if (qty < 1) { qty = 1; refresh(); } } });
+  const price = h('div', { class: 'sheet-price' });
+  const step = (d) => { qty = Math.max(1, qty + d); refresh(); };
+  const wrap = h('div', { class: 'sheet-wrap' });
+  const card = h('div', { class: 'sheet', role: 'dialog', 'aria-label': 'Ajouter au panier' },
+    h('div', { class: 'sheet-head' },
+      h('b', {}, product.name),
+      h('small', {}, `Réf. ${product.ref}` + (state.client ? ` · ${state.client.name}` : ''))),
+    product.promos.map((p) => h('div', { class: 'promo-line' }, icon('tag', 16),
+      `${p.title} : -${pctText(p.discountPct)} dès ${p.minQty} pièce${p.minQty > 1 ? 's' : ''}`)),
+    h('div', { class: 'qtyrow' },
+      h('div', { class: 'stepper' },
+        h('button', { type: 'button', 'aria-label': 'Moins', onclick: () => step(-1) }, icon('minus', 20)),
+        input,
+        h('button', { type: 'button', 'aria-label': 'Plus', onclick: () => step(1) }, icon('plus', 20))),
+      h('span', { class: 'times' }, '×'),
+      h('div', { class: 'selectbox' }, select)),
+    price,
+    h('div', { class: 'sheet-actions' },
+      h('button', { class: 'btn cancel', onclick: () => close() }, icon('close', 20), 'Annuler'),
+      h('button', { class: 'btn primary', onclick: add }, icon('check', 20), 'Ajouter')));
+  wrap.append(card);
+  $layer.append(wrap);
+
+  function refresh(writeInput = true) {
+    if (writeInput) input.value = qty;
+    const u = units.find((x) => x.unit === select.value);
+    const pieces = qty * u.qty;
+    // Une promo peut s'appliquer selon la quantité : même règle que le serveur.
+    let pct = product.clientDiscountPct;
+    let promo = false;
+    for (const p of product.promos) if (pieces >= p.minQty && p.discountPct > pct) { pct = p.discountPct; promo = true; }
+    const net = Math.round(u.baseCents * (1 - pct / 100));
+    price.replaceChildren(
+      h('span', {}, `${eur(net)} / ${u.label.toLowerCase()}`,
+        pct ? h('em', { class: promo ? 'promo' : '' }, ` -${pctText(pct)}${promo ? ' promo' : ''}`) : null,
+        u.qty > 1 ? h('small', {}, ` soit ${eur(Math.round(net / u.qty))} / pièce`) : null),
+      h('b', {}, eur(net * qty)));
+  }
+  function close() {
+    wrap.remove();
+    onClose();
+  }
+  function add() {
+    if (qty < 1) return;
+    addToCart(product, select.value, qty);
+    flyToCart(card);
+    toast('Article ajouté au panier');
+    close();
+  }
+  refresh();
+}
+
+// Ouvre la fenêtre d'ajout ; demande d'abord le client si aucun n'est sélectionné.
+async function addProduct(productId) {
+  if (!state.client) {
+    toast("Sélectionnez d'abord un client.", 'err');
+    return go('/clients');
+  }
+  try {
+    const { product } = await api(`/products/${productId}?client=${state.client.id}`);
+    openAddSheet(product, 'piece');
+  } catch (e) {
+    fail(e);
+  }
+}
+
+// ---------- Scan ----------
+function scanView() {
+  header('Scan', { back: '/' });
+  if (!state.client) {
+    $view.replaceChildren(clientPicker((c) => { setClient(c); scanView(); }));
+    return;
+  }
+  $view.className = 'scan';
+  const video = h('video', { playsinline: true, muted: true, autoplay: true });
+  const message = h('div', { class: 'scan-msg' }, 'Démarrage de la caméra…');
+  let scanner = null;
+  let busy = false;
+  let gone = false;
+
+  async function lookup(code) {
+    if (busy) return;
+    busy = true;
+    scanner?.pause();
+    try {
+      const { product, unit } = await api(`/scan/${encodeURIComponent(code)}?client=${state.client.id}`);
+      openAddSheet(product, unit || 'piece', () => { busy = false; scanner?.resume(); });
+    } catch (e) {
+      if (e.status === 401) return fail(e);
+      toast(e.status === 404 ? `Code inconnu : ${code}` : e.message, 'err');
+      busy = false;
+      scanner?.resume();
+    }
+  }
+  const manual = h('input', { type: 'text', placeholder: 'Code-barres ou référence', autocapitalize: 'off', autocorrect: 'off', enterkeyhint: 'go' });
+  $view.replaceChildren(
+    h('div', { class: 'camera' }, video, h('div', { class: 'frame' }), message),
+    h('button', { class: 'scan-client', onclick: () => { setClient(null); scanView(); } },
+      h('span', {}, 'Client'), h('b', {}, state.client.name), h('u', {}, 'Changer')),
+    h('form', { class: 'scan-manual', onsubmit: (e) => { e.preventDefault(); const v = manual.value.trim(); if (v) { manual.value = ''; manual.blur(); lookup(v); } } },
+      manual, h('button', { class: 'btn primary', type: 'submit' }, 'OK'))
+  );
+  startScanner(video, lookup).then(
+    (s) => {
+      if (gone) return s.stop();
+      scanner = s;
+      message.textContent = 'Placez le code-barres dans le cadre';
+      if (busy) s.pause();
+    },
+    (e) => {
+      message.textContent = e.message + ' Vous pouvez saisir le code ci-dessous.';
+      message.classList.add('err');
+    }
+  );
+  cleanup = () => { gone = true; scanner?.stop(); };
+}
+
+// ---------- Panier ----------
+function cartView() {
+  header('Panier', { back: '/' });
+  if (!state.client) {
+    $view.replaceChildren(clientPicker((c) => { setClient(c); cartView(); }, 'Panier : sélectionnez un client'));
+    return;
+  }
+  const body = h('div', { class: 'stack' }, loading());
+  const note = h('textarea', { rows: 2, placeholder: 'Remarque pour la commande (facultatif)', value: store.get(cartKey() + ':note', ''),
+    oninput: () => store.set(cartKey() + ':note', note.value) });
+  $view.replaceChildren(h('div', { class: 'pad' },
+    h('button', { class: 'clientbar', onclick: () => go(`/client/${state.client.id}`) },
+      h('span', {}, 'Commande pour'), h('b', {}, state.client.name), icon('chevron', 18)),
+    body));
+  let seq = 0;
+
+  async function refresh() {
+    const lines = getCart();
+    if (!lines.length) {
+      body.replaceChildren(empty('Le panier est vide.'),
+        h('button', { class: 'btn primary big', onclick: () => go('/scan') }, icon('scan', 22), 'Scanner des articles'));
+      return;
+    }
+    const mine = ++seq;
+    let quote;
+    try {
+      quote = await api('/quote', { method: 'POST', body: { clientId: state.client.id, lines } });
+    } catch (e) {
+      return fail(e);
+    }
+    if (mine !== seq) return;
+    // Articles retirés du catalogue entre-temps : on nettoie le panier.
+    if (quote.lines.length !== lines.length) {
+      setCart(quote.lines.map((l) => ({ productId: l.productId, unit: l.unit, qty: l.qty })));
+    }
+    const change = (l, qty) => {
+      const cart = getCart();
+      const item = cart.find((x) => x.productId === l.productId && x.unit === l.unit);
+      if (!item) return;
+      if (qty < 1) cart.splice(cart.indexOf(item), 1);
+      else item.qty = qty;
+      setCart(cart);
+      refresh();
+    };
+    const pctDone = quote.francoCents ? Math.min(100, (quote.totalCents / quote.francoCents) * 100) : 100;
+    const send = h('button', { class: 'btn primary big', disabled: !quote.canOrder, onclick: submit }, icon('check', 22), 'Envoyer la commande');
+    body.replaceChildren(
+      h('div', { class: 'cartlines' }, quote.lines.map((l) => {
+        const input = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.qty, 'aria-label': 'Quantité',
+          onchange: () => change(l, Math.max(1, Math.floor(Number(input.value)) || 1)) });
+        return h('div', { class: 'cartline' },
+          h('div', { class: 'grow', onclick: () => go(`/produit/${l.productId}`) },
+            h('b', {}, l.name),
+            h('small', {}, `Réf. ${l.ref} · ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
+            h('small', {}, `${eur(l.netCents)} / ${l.unitLabel.toLowerCase()}`,
+              l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
+          h('div', { class: 'cartline-right' },
+            h('b', {}, eur(l.totalCents)),
+            h('div', { class: 'stepper small' },
+              h('button', { 'aria-label': l.qty > 1 ? 'Moins' : 'Supprimer', onclick: () => change(l, l.qty - 1) }, icon(l.qty > 1 ? 'minus' : 'trash', 18)),
+              input,
+              h('button', { 'aria-label': 'Plus', onclick: () => change(l, l.qty + 1) }, icon('plus', 18)))));
+      })),
+      h('div', { class: 'totals' },
+        h('div', { class: 'total' }, h('span', {}, 'Total du panier (HT)'), h('b', {}, eur(quote.totalCents))),
+        quote.francoCents
+          ? h('div', { class: 'franco' + (quote.missingCents ? '' : ' ok') },
+              h('div', { class: 'bar' }, h('i', { style: { width: pctDone + '%' } })),
+              quote.missingCents
+                ? h('p', {}, 'Il manque ', h('b', {}, eur(quote.missingCents)), ` pour atteindre le franco (${eur(quote.francoCents)}).`)
+                : h('p', {}, icon('check', 16), `Franco atteint (${eur(quote.francoCents)}).`),
+              quote.missingCents && quote.francoBlocking ? h('p', { class: 'muted' }, "La commande pourra être envoyée une fois le franco atteint.") : null)
+          : null),
+      note,
+      send,
+      h('button', { class: 'btn ghost', onclick: () => go('/scan') }, icon('scan', 18), 'Continuer à scanner'),
+      h('button', { class: 'btn ghost danger', onclick: () => { if (confirm('Vider le panier ?')) { setCart([]); refresh(); } } }, icon('trash', 18), 'Vider le panier')
+    );
+
+    async function submit() {
+      if (!confirm(`Envoyer la commande pour ${state.client.name} ?\nTotal : ${eur(quote.totalCents)} HT`)) return;
+      send.disabled = true;
+      try {
+        const { order } = await api('/orders', { method: 'POST', body: { clientId: state.client.id, lines: getCart(), note: note.value } });
+        setCart([]);
+        store.set(cartKey() + ':note', '');
+        toast(`Commande ${order.number} envoyée`);
+        location.replace('#/commande/' + order.id);
+      } catch (e) {
+        send.disabled = false;
+        fail(e);
+        if (e.status !== 401) refresh();
+      }
+    }
+  }
+  refresh();
+}
+
+// ---------- Catalogue ----------
+let catalogueQuery = '';
+function productRow(p) {
+  return h('button', { class: 'row', onclick: () => go(`/produit/${p.id}`) },
+    h('div', { class: 'thumb' }, p.imageUrl ? h('img', { src: p.imageUrl, alt: '', loading: 'lazy' }) : icon('box', 26)),
+    h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.category ? ' · ' + p.category : ''}`)),
+    p.priceCents != null ? h('span', { class: 'price' }, eur(p.priceCents)) : null);
+}
+async function catalogueView(categoryId) {
+  header('Catalogue', { back: categoryId ? '/catalogue' : '/' });
+  const out = h('div', {}, loading());
+  const show = debounce(render, 220);
+  $view.replaceChildren(h('div', { class: 'pad' },
+    searchBar('Référence, nom, caractéristique…', categoryId ? '' : catalogueQuery, (v) => { if (!categoryId) catalogueQuery = v; show(v); }),
+    out));
+  let seq = 0;
+  async function render(query) {
+    const mine = ++seq;
+    try {
+      if (!query.trim() && !categoryId) {
+        const { categories } = await api('/categories');
+        if (mine !== seq) return;
+        out.replaceChildren(h('h2', {}, 'Catégories'),
+          h('div', { class: 'rows' }, categories.length
+            ? categories.map((c) => h('button', { class: 'row', onclick: () => go(`/catalogue/${c.id}`) },
+                h('div', { class: 'grow' }, h('b', {}, c.name), h('small', {}, `${c.count} article${c.count > 1 ? 's' : ''}`)), icon('chevron', 18)))
+            : empty('Le catalogue est vide.')));
+        return;
+      }
+      const params = new URLSearchParams({ q: query });
+      if (categoryId) params.set('category', categoryId);
+      const [{ products }, cats] = await Promise.all([api('/products?' + params), categoryId ? api('/categories') : null]);
+      if (mine !== seq) return;
+      const cat = cats?.categories.find((c) => c.id === categoryId);
+      out.replaceChildren(
+        h('h2', {}, cat ? cat.name : `${products.length} résultat${products.length > 1 ? 's' : ''}`),
+        h('div', { class: 'rows' }, products.length ? products.map(productRow) : empty('Aucun article trouvé.')));
+    } catch (e) {
+      fail(e);
+    }
+  }
+  render(categoryId ? '' : catalogueQuery);
+}
+
+async function productView(id) {
+  header('Article', { back: true });
+  $view.replaceChildren(loading());
+  let product;
+  try {
+    ({ product } = await api(`/products/${id}` + (state.client ? `?client=${state.client.id}` : '')));
+  } catch (e) {
+    $view.replaceChildren(empty(e.message));
+    return fail(e);
+  }
+  const p = product;
+  $view.replaceChildren(h('div', { class: 'pad product' },
+    p.imageUrl ? h('img', { class: 'hero', src: p.imageUrl, alt: p.name }) : h('div', { class: 'hero ph' }, icon('box', 64)),
+    h('h2', {}, p.name),
+    h('p', { class: 'muted' }, `Réf. ${p.ref}${p.category ? ' · ' + p.category : ''}`),
+    p.promos.map((x) => h('div', { class: 'promo-line' }, icon('tag', 16),
+      `${x.title} : -${pctText(x.discountPct)} dès ${x.minQty} pièce${x.minQty > 1 ? 's' : ''}` + (x.endsOn ? ` (jusqu'au ${frDay(x.endsOn)})` : ''))),
+    h('h3', {}, 'Prix HT'),
+    state.client
+      ? h('p', { class: 'muted' }, `Prix pour ${state.client.name}`, p.clientDiscountPct ? ` — remise ${pctText(p.clientDiscountPct)}` : ' — pas de remise')
+      : h('p', { class: 'muted' }, 'Prix de base. Sélectionnez un client pour voir sa remise.'),
+    h('table', { class: 'prices' },
+      h('tbody', {}, p.units.map((u) => h('tr', {},
+        h('td', {}, h('b', {}, u.label), u.qty > 1 ? h('small', {}, ` ${u.qty} pièces`) : null),
+        h('td', { class: 'num' }, u.netCents !== u.baseCents ? h('s', {}, eur(u.baseCents)) : null),
+        h('td', { class: 'num' }, h('b', {}, eur(u.netCents)), u.promo ? h('em', { class: 'promo' }, ' promo') : null))))),
+    p.units.length ? null : h('p', { class: 'muted' }, 'Aucun prix défini pour cet article.'),
+    h('button', { class: 'btn primary big', onclick: () => addProduct(p.id) }, icon('cart', 22), 'Ajouter au panier'),
+    p.description ? [h('h3', {}, 'Description'), h('p', { class: 'desc' }, p.description)] : null,
+    p.specs.length ? [h('h3', {}, 'Fiche technique'),
+      h('table', { class: 'specs' }, h('tbody', {}, p.specs.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))))] : null,
+    p.units.some((u) => u.ean) ? [h('h3', {}, 'Codes-barres'),
+      h('table', { class: 'specs' }, h('tbody', {}, p.units.filter((u) => u.ean).map((u) => h('tr', {}, h('th', {}, u.label), h('td', {}, u.ean)))))] : null
+  ));
+}
+
+// ---------- Commandes passées ----------
+async function ordersView() {
+  header('Commandes passées', { back: '/' });
+  $view.replaceChildren(loading());
+  try {
+    const { orders } = await api('/orders');
+    $view.replaceChildren(h('div', { class: 'pad' }, h('div', { class: 'rows' },
+      orders.length ? orders.map((o) => h('button', { class: 'row', onclick: () => go(`/commande/${o.id}`) },
+        h('div', { class: 'grow' }, h('b', {}, o.client.name), h('small', {}, `${o.number} · ${frDate(o.createdAt)}`)),
+        h('div', { class: 'right-col' }, h('b', {}, eur(o.totalCents)), statusChip(o))))
+      : empty('Aucune commande pour le moment.'))));
+  } catch (e) {
+    fail(e);
+  }
+}
+
+async function orderView(id) {
+  header('Commande', { back: '/commandes' });
+  $view.replaceChildren(loading());
+  try {
+    const { order: o, lines } = await api(`/orders/${id}`);
+    const c = o.client;
+    const hasDel = c.del_address || c.del_city;
+    $view.replaceChildren(h('div', { class: 'pad' },
+      h('div', { class: 'card' },
+        h('div', { class: 'spread' }, h('h2', {}, o.number), statusChip(o)),
+        h('p', { class: 'muted' }, `${frDate(o.createdAt)} · ${o.userName}`),
+        h('p', {}, h('b', {}, c.name), h('br'), 'Livraison : ',
+          [hasDel ? c.del_address : c.hq_address, hasDel ? `${c.del_zip} ${c.del_city}` : `${c.hq_zip} ${c.hq_city}`].filter((x) => x.trim()).join(', ') || '—'),
+        o.note ? h('p', { class: 'note' }, o.note) : null),
+      h('div', { class: 'cartlines' }, lines.map((l) => h('div', { class: 'cartline' },
+        h('div', { class: 'grow' }, h('b', {}, l.name),
+          h('small', {}, `Réf. ${l.ref} · ${l.qty} × ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
+          h('small', {}, `${eur(l.netCents)}`, l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
+        h('b', {}, eur(l.totalCents))))),
+      h('div', { class: 'totals' }, h('div', { class: 'total' }, h('span', {}, 'Total HT'), h('b', {}, eur(o.totalCents))))));
+  } catch (e) {
+    $view.replaceChildren(empty(e.message));
+    fail(e);
+  }
+}
+
+// ---------- Clients ----------
+function clientsView() {
+  header('Clients', { back: '/' });
+  $view.replaceChildren(clientPicker((c) => go(`/client/${c.id}`), 'Mes clients'));
+}
+
+async function clientView(id) {
+  header('Client', { back: '/clients' });
+  $view.replaceChildren(loading());
+  let c;
+  try {
+    ({ client: c } = await api(`/clients/${id}`));
+  } catch (e) {
+    $view.replaceChildren(empty(e.message));
+    return fail(e);
+  }
+  const line = (label, value, href) => value ? h('div', { class: 'kv' }, h('span', {}, label), href ? h('a', { href }, value) : h('b', {}, value)) : null;
+  const tel = (v) => v && 'tel:' + v.replace(/[^+\d]/g, '');
+  const section = (title, ...rows) => rows.some(Boolean) ? h('div', { class: 'card' }, h('h3', {}, title), rows) : null;
+  const addr = (a, z, city) => [a, [z, city].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const current = state.client?.id === c.id;
+  $view.replaceChildren(h('div', { class: 'pad' },
+    h('h2', {}, c.name),
+    h('p', { class: 'muted' }, [c.number && `N° client ${c.number}`, c.vat && `TVA ${c.vat}`].filter(Boolean).join(' · ')),
+    h('button', { class: 'btn primary big', onclick: () => { setClient(c); go('/scan'); } }, icon('scan', 22), 'Commander pour ce client'),
+    current ? h('p', { class: 'muted center' }, 'Client en cours de commande') : null,
+    section('Conditions', line('Remise générale', pctText(c.discountPct)), line('Franco', c.francoCents != null ? eur(c.francoCents) : null)),
+    section('Adresses', line('Siège social', addr(c.hq_address, c.hq_zip, c.hq_city)),
+      line('Livraison', addr(c.del_address, c.del_zip, c.del_city) || 'Identique au siège social'), line('Horaires', c.hours)),
+    section('Contacts', line('Téléphone', c.phone, tel(c.phone)), line('E-mail', c.email, c.email && 'mailto:' + c.email),
+      line('Gérant / responsable', c.manager_name), line('Tél. responsable', c.manager_phone, tel(c.manager_phone))),
+    section('Comptabilité', line('Contact', c.accounting_name), line('Téléphone', c.accounting_phone, tel(c.accounting_phone)),
+      line('E-mail', c.accounting_email, c.accounting_email && 'mailto:' + c.accounting_email), line('Compte bancaire', c.iban)),
+    section('Informations complémentaires', c.notes ? h('p', { class: 'desc' }, c.notes) : null),
+    h('button', { class: 'btn ghost', onclick: () => go(`/client/${c.id}/modifier`) }, 'Modifier la fiche')));
+}
+
+async function clientForm(id) {
+  header(id ? 'Modifier le client' : 'Nouveau client', { back: true });
+  let c = {};
+  if (id) {
+    $view.replaceChildren(loading());
+    try {
+      ({ client: c } = await api(`/clients/${id}`));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  const inputs = {};
+  const input = (name, label, attrs = {}) => {
+    inputs[name] = attrs.rows ? h('textarea', { ...attrs, value: c[name] || '' }) : h('input', { type: 'text', ...attrs, value: c[name] || '' });
+    return field(label, inputs[name]);
+  };
+  const group = (title, ...children) => h('fieldset', {}, h('legend', {}, title), children);
+  const error = h('p', { class: 'error', role: 'alert' });
+  const save = h('button', { class: 'btn primary big', type: 'submit' }, 'Enregistrer');
+  $view.replaceChildren(h('form', { class: 'pad form', onsubmit: async (e) => {
+    e.preventDefault();
+    save.disabled = true;
+    error.textContent = '';
+    const body = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
+    try {
+      const r = await api(id ? `/clients/${id}` : '/clients', { method: id ? 'PUT' : 'POST', body });
+      if (state.client?.id === r.client.id) setClient(r.client);
+      toast('Client enregistré');
+      location.replace('#/client/' + r.client.id);
+    } catch (err) {
+      error.textContent = err.message;
+      save.disabled = false;
+    }
+  } },
+    group('Identité',
+      input('name', 'Nom de la société *', { required: true }),
+      input('vat', 'Numéro de TVA', { placeholder: 'BE 0123.456.789', autocapitalize: 'characters' }),
+      input('number', 'Numéro client', { placeholder: id ? '' : 'Attribué automatiquement si vide' })),
+    group('Adresse du siège social',
+      input('hq_address', 'Rue et numéro', { autocomplete: 'off' }),
+      h('div', { class: 'two' }, input('hq_zip', 'Code postal', { inputmode: 'numeric' }), input('hq_city', 'Localité'))),
+    group('Adresse de livraison',
+      h('p', { class: 'muted' }, 'Laisser vide si identique au siège social.'),
+      input('del_address', 'Rue et numéro', { autocomplete: 'off' }),
+      h('div', { class: 'two' }, input('del_zip', 'Code postal', { inputmode: 'numeric' }), input('del_city', 'Localité')),
+      input('hours', 'Horaires du magasin', { rows: 2, placeholder: 'Lu–Ve 8h–18h, Sa 9h–12h' })),
+    group('Contacts',
+      input('phone', 'Téléphone du magasin', { type: 'tel' }),
+      input('email', 'Adresse e-mail', { type: 'email', autocapitalize: 'off' }),
+      input('manager_name', 'Gérant / responsable'),
+      input('manager_phone', 'Téléphone du responsable', { type: 'tel' })),
+    group('Comptabilité',
+      input('accounting_name', 'Contact comptabilité'),
+      input('accounting_phone', 'Téléphone comptabilité', { type: 'tel' }),
+      input('accounting_email', 'E-mail comptabilité (factures)', { type: 'email', autocapitalize: 'off' }),
+      input('iban', 'Compte bancaire (IBAN)', { autocapitalize: 'characters' })),
+    group('Informations complémentaires', input('notes', 'Remarques', { rows: 3 })),
+    error, save));
+}
+
+// ---------- Promos ----------
+async function promosView() {
+  header('Promos', { back: '/' });
+  $view.replaceChildren(loading());
+  try {
+    const { promos } = await api('/promos');
+    $view.replaceChildren(h('div', { class: 'pad' }, promos.length
+      ? promos.map((p) => h('button', { class: 'promo-card', onclick: () => go(`/produit/${p.productId}`) },
+          h('div', { class: 'pct' }, `-${pctText(p.discountPct)}`),
+          h('div', { class: 'grow' },
+            h('b', {}, p.title),
+            h('small', {}, `${p.productName} · Réf. ${p.ref}`),
+            p.description ? h('small', {}, p.description) : null,
+            h('small', { class: 'cond' }, `Quantité minimum : ${p.minQty} pièce${p.minQty > 1 ? 's' : ''}`,
+              p.endsOn ? ` · jusqu'au ${frDay(p.endsOn)}` : ''))))
+      : empty('Aucune promo en ce moment.')));
+  } catch (e) {
+    fail(e);
+  }
+}
+
+// ---------- Compte ----------
+function accountView() {
+  header('Mon compte', { back: '/' });
+  const u = state.user;
+  $view.replaceChildren(h('div', { class: 'pad' },
+    h('div', { class: 'card center' },
+      h('div', { class: 'avatar' }, icon('user', 40)),
+      h('h2', {}, u.name || u.username),
+      h('p', { class: 'muted' }, `${u.username} · ${u.role === 'admin' ? 'Administrateur' : 'Délégué'}`)),
+    state.client ? h('div', { class: 'card' }, h('h3', {}, 'Client en cours'), h('p', {}, state.client.name),
+      h('button', { class: 'btn ghost', onclick: () => { setClient(null); accountView(); } }, 'Changer de client')) : null,
+    h('button', { class: 'btn ghost danger', onclick: async () => {
+      if (!confirm('Se déconnecter ?')) return;
+      await api('/logout', { method: 'POST' }).catch(() => {});
+      showLogin();
+    } }, 'Se déconnecter')));
+}
+
+// ---------- Démarrage ----------
+(async function start() {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  try {
+    state.user = (await api('/me')).user;
+  } catch {
+    $view.replaceChildren(empty('Connexion au serveur impossible.'),
+      h('div', { class: 'pad' }, h('button', { class: 'btn primary', onclick: () => location.reload() }, 'Réessayer')));
+    return;
+  }
+  route();
+})();
