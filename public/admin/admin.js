@@ -184,7 +184,8 @@ async function productsTab() {
     try {
       const r = await api('/admin/products/import', { method: 'POST', body: { csv: await file.files[0].text() } });
       modal('Import terminé', [
-        h('div', { class: 'notice ok' }, `${r.created} article(s) créé(s), ${r.updated} mis à jour.`),
+        h('div', { class: 'notice ok' }, `${r.created} article(s) créé(s), ${r.updated} mis à jour.`,
+          r.noPrice ? ` ${r.noPrice} ligne(s) sans prix : fiche conservée, pas de tarif.` : ''),
         r.errors.length ? h('div', { class: 'notice' }, h('b', {}, `${r.errors.length} ligne(s) ignorée(s) :`), h('pre', {}, r.errors.join('\n'))) : null]);
       reload();
     } catch (e) {
@@ -197,26 +198,28 @@ async function productsTab() {
         { onchange: (e) => { productFilter.category = e.target.value; reload(); } }),
       file,
       h('button', { class: 'btn', onclick: importHelp }, 'Format CSV'),
+      h('a', { class: 'btn', href: '/api/admin/products/export' }, 'Exporter en CSV'),
       h('button', { class: 'btn', onclick: () => file.click() }, 'Importer un CSV'),
       h('button', { class: 'btn primary', onclick: () => productModal(null, categories) }, 'Nouvel article')),
-    table(['Référence', 'Nom', 'Catégorie', { num: 'Prix pièce HT' }, 'État'], products.map((p) =>
+    table(['Référence', 'Code', 'Nom', 'Catégorie', { num: 'Prix pièce HT' }, 'État'], products.map((p) =>
       h('tr', { class: 'click' + (p.active ? '' : ' off'), onclick: () => productModal(p.id, categories).catch(oops) },
-        h('td', {}, h('b', {}, p.ref)), h('td', {}, p.name), h('td', {}, p.category || '—'),
-        h('td', { class: 'num' }, p.priceCents != null ? eur(p.priceCents) : '—'),
+        h('td', {}, h('b', {}, p.ref)), h('td', {}, p.code), h('td', {}, p.name), h('td', {}, p.category || '—'),
+        h('td', { class: 'num' }, p.priceCents != null ? eur(p.priceCents) : h('span', { class: 'chip' }, 'Sans prix')),
         h('td', {}, p.active ? 'Actif' : 'Désactivé'))), 'Aucun article.'),
     products.length >= 300 ? h('p', { class: 'muted' }, 'Affichage limité à 300 articles : affinez la recherche.') : null);
 }
 
 function importHelp() {
-  const sample = 'ref;nom;categorie;description;unite;qte;prix;ean;caracteristiques\n' +
-    'ABC123;Tournevis plat 5,5 x 100;Tournevis;Lame Cr-V;piece;1;3,90;5200000000011;Empreinte: Plate | Longueur: 100 mm\n' +
-    'ABC123;;;;boite;10;37,00;5200000000028;\n' +
-    'ABC123;;;;carton;60;210,00;5200000000035;\n';
+  const sample = 'ref;code;nom;categorie;description;unite;qte;prix;ean;caracteristiques\n' +
+    'ABC123;012345;Tournevis plat 5,5 x 100;Tournevis;Lame Cr-V;piece;1;3,90;5200000000011;Empreinte: Plate | Longueur: 100 mm\n' +
+    'ABC123;;;;;boite;10;37,00;5200000000028;\n' +
+    'ABC123;;;;;carton;60;210,00;5200000000035;\n';
   modal('Format du fichier CSV', [
     h('p', {}, 'Une ligne par article et par conditionnement. Séparateur « ; » (export Excel « CSV »). ',
-      'Un article déjà existant (même référence) est mis à jour ; ses prix sont remplacés par ceux du fichier.'),
+      'Un article déjà existant (même référence) est mis à jour ; ses prix sont remplacés par ceux du fichier. ',
+      'Le plus simple : « Exporter en CSV », compléter les colonnes prix et ean dans Excel, puis réimporter le fichier.'),
     h('ul', {},
-      h('li', {}, h('b', {}, 'ref'), ' (obligatoire), ', h('b', {}, 'nom'), ' (obligatoire pour un nouvel article), ', h('b', {}, 'categorie'), ', ', h('b', {}, 'description')),
+      h('li', {}, h('b', {}, 'ref'), ' (obligatoire), ', h('b', {}, 'code'), ' (code article du fournisseur), ', h('b', {}, 'nom'), ' (obligatoire pour un nouvel article), ', h('b', {}, 'categorie'), ', ', h('b', {}, 'description')),
       h('li', {}, h('b', {}, 'unite'), ' : piece, boite, carton ou palette — ', h('b', {}, 'qte'), ' : nombre de pièces dans ce conditionnement'),
       h('li', {}, h('b', {}, 'prix'), ' : prix HT du conditionnement entier — ', h('b', {}, 'ean'), ' : code-barres de ce conditionnement'),
       h('li', {}, h('b', {}, 'caracteristiques'), ' : « Nom: valeur | Nom: valeur » — ', h('b', {}, 'image'), ' : adresse https d\'une photo')),
@@ -229,9 +232,10 @@ async function productModal(id, categories) {
   const p = id ? (await api(`/admin/products/${id}`)).product : { specs: [], units: [{ unit: 'piece', qty: 1, priceCents: 0, ean: '' }], active: true };
   const ref = text(p.ref, { required: true });
   const name = text(p.name, { required: true });
+  const code = text(p.code, { placeholder: 'Code fournisseur' });
   const cat = select([['', '— Aucune —'], ...categories.map((c) => [c.id, c.name])], p.categoryId);
   const desc = area(p.description, 3);
-  const specs = area(p.specs.map(([k, v]) => `${k}: ${v}`).join('\n'), 4);
+  const specs = area(p.specs.map(([k, v]) => (v ? `${k}: ${v}` : k)).join('\n'), 6);
   const image = text(p.imageUrl, { placeholder: 'https://…' });
   const active = check('Article actif (visible dans l\'application)', p.active);
   const rows = UNITS.map(([unit, label]) => {
@@ -249,10 +253,10 @@ async function productModal(id, categories) {
   }).filter(Boolean));
   drawBarcodes();
   modal(id ? `Article ${p.ref}` : 'Nouvel article', [
-    h('div', { class: 'grid3' }, f('Référence *', ref), f('Catégorie', cat), f('Photo (adresse https)', image)),
+    h('div', { class: 'grid4' }, f('Référence *', ref), f('Code article', code), f('Catégorie', cat), f('Photo (adresse https)', image)),
     f('Nom *', name),
     f('Description', desc),
-    f('Fiche technique — une caractéristique par ligne, « Nom: valeur »', specs),
+    f('Fiche technique — une caractéristique par ligne, « Nom: valeur » (une ligne sans « : » devient un sous-titre)', specs),
     h('fieldset', {}, h('legend', {}, 'Conditionnements et prix HT'),
       h('table', { class: 'units' },
         h('thead', {}, h('tr', {}, ['', 'Conditionnement', 'Nombre de pièces', 'Prix HT du conditionnement (€)', 'Code-barres (EAN)'].map((x) => h('th', {}, x)))),
@@ -268,9 +272,9 @@ async function productModal(id, categories) {
       if (priceCents == null || r.price.value.trim() === '') throw new Error(`Prix invalide pour « ${r.label} ».`);
       return { unit: r.unit, qty: Number(r.qty.value) || 1, priceCents, ean: r.ean.value.trim() };
     });
-    const body = { ref: ref.value, name: name.value, categoryId: cat.value || null, description: desc.value, imageUrl: image.value,
+    const body = { ref: ref.value, code: code.value, name: name.value, categoryId: cat.value || null, description: desc.value, imageUrl: image.value,
       active: active.input.checked, units,
-      specs: specs.value.split('\n').map((l) => l.split(/:(.*)/s).slice(0, 2).map((x) => (x || '').trim())).filter((s) => s[0] && s[1]) };
+      specs: specs.value.split('\n').map((l) => l.split(/:(.*)/s).slice(0, 2).map((x) => (x || '').trim())).filter((s) => s[0]).map((s) => [s[0], s[1] || '']) };
     await api(id ? `/admin/products/${id}` : '/admin/products', { method: id ? 'PUT' : 'POST', body });
     reload();
   } });

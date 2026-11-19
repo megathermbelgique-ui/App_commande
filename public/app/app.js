@@ -470,7 +470,7 @@ let catalogueQuery = '';
 function productRow(p) {
   return h('button', { class: 'row', onclick: () => go(`/produit/${p.id}`) },
     h('div', { class: 'thumb' }, p.imageUrl ? h('img', { src: p.imageUrl, alt: '', loading: 'lazy' }) : icon('box', 26)),
-    h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.category ? ' · ' + p.category : ''}`)),
+    h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.code ? ' · ' + p.code : ''}`)),
     p.priceCents != null ? h('span', { class: 'price' }, eur(p.priceCents)) : null);
 }
 async function catalogueView(categoryId) {
@@ -523,7 +523,7 @@ async function productView(id) {
   $view.replaceChildren(h('div', { class: 'pad product' },
     p.imageUrl ? h('img', { class: 'hero', src: p.imageUrl, alt: p.name }) : h('div', { class: 'hero ph' }, icon('box', 64)),
     h('h2', {}, p.name),
-    h('p', { class: 'muted' }, `Réf. ${p.ref}${p.category ? ' · ' + p.category : ''}`),
+    h('p', { class: 'muted' }, [`Réf. ${p.ref}`, p.code && `Code ${p.code}`, p.category].filter(Boolean).join(' · ')),
     p.promos.map((x) => h('div', { class: 'promo-line' }, icon('tag', 16),
       `${x.title} : -${pctText(x.discountPct)} dès ${x.minQty} pièce${x.minQty > 1 ? 's' : ''}` + (x.endsOn ? ` (jusqu'au ${frDay(x.endsOn)})` : ''))),
     h('h3', {}, 'Prix HT'),
@@ -535,11 +535,13 @@ async function productView(id) {
         h('td', {}, h('b', {}, u.label), u.qty > 1 ? h('small', {}, ` ${u.qty} pièces`) : null),
         h('td', { class: 'num' }, u.netCents !== u.baseCents ? h('s', {}, eur(u.baseCents)) : null),
         h('td', { class: 'num' }, h('b', {}, eur(u.netCents)), u.promo ? h('em', { class: 'promo' }, ' promo') : null))))),
-    p.units.length ? null : h('p', { class: 'muted' }, 'Aucun prix défini pour cet article.'),
-    h('button', { class: 'btn primary big', onclick: () => addProduct(p.id) }, icon('cart', 22), 'Ajouter au panier'),
+    p.units.length ? null : h('p', { class: 'muted' }, "Prix pas encore défini : cet article ne peut pas être commandé pour l'instant."),
+    p.units.length ? h('button', { class: 'btn primary big', onclick: () => addProduct(p.id) }, icon('cart', 22), 'Ajouter au panier') : null,
     p.description ? [h('h3', {}, 'Description'), h('p', { class: 'desc' }, p.description)] : null,
     p.specs.length ? [h('h3', {}, 'Fiche technique'),
-      h('table', { class: 'specs' }, h('tbody', {}, p.specs.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))))] : null,
+      h('table', { class: 'specs' }, h('tbody', {}, p.specs.map(([k, v]) => (v
+        ? h('tr', {}, h('th', {}, k), h('td', {}, v))
+        : h('tr', { class: 'section' }, h('td', { colspan: 2 }, k))))))] : null,
     p.units.some((u) => u.ean) ? [h('h3', {}, 'Codes-barres'),
       h('table', { class: 'specs' }, h('tbody', {}, p.units.filter((u) => u.ean).map((u) => h('tr', {}, h('th', {}, u.label), h('td', {}, u.ean)))))] : null
   ));

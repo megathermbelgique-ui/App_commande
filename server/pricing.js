@@ -67,6 +67,7 @@ module.exports = function createPricing(store) {
     return {
       id: p.id,
       ref: p.ref,
+      code: p.code,
       name: p.name,
       categoryId: p.category_id,
       category: p.category || '',

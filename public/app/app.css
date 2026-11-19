@@ -232,6 +232,7 @@ table { width: 100%; border-collapse: collapse; background: var(--card); border-
 td, th { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 tr:last-child td, tr:last-child th { border-bottom: 0; }
 .specs th { color: var(--muted); font-weight: 500; width: 45%; }
+.specs tr.section td { font-weight: 700; background: #f6f7f9; }
 .num { text-align: right; white-space: nowrap; }
 .prices small { display: inline; }
 .prices s { color: var(--muted); }

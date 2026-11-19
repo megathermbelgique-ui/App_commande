@@ -27,6 +27,8 @@ const cents = (v) => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && n >= 0 ? n : 0;
 };
+// Photo d'article : adresse https, ou image du catalogue fourni avec l'application.
+const isImage = (v) => /^https:\/\//.test(v) || /^\/catalog\/[\w.-]+$/.test(v);
 const likeTokens = (query) => normalize(query).split(/\s+/).filter(Boolean).slice(0, 8);
 
 class HttpError extends Error {
@@ -62,6 +64,7 @@ function createApp(store) {
   app.get('/vendor/zxing.min.js', (req, res) =>
     res.sendFile(path.join(ROOT, 'node_modules/@zxing/library/umd/index.min.js'), { maxAge: '30d' })
   );
+  app.use('/catalog', express.static(path.join(ROOT, 'catalog/img'), { maxAge: '7d' }));
   app.use('/shared', express.static(path.join(ROOT, 'public/shared'), noCache));
   app.use('/admin', express.static(path.join(ROOT, 'public/admin'), noCache));
   app.use('/', express.static(path.join(ROOT, 'public/app'), noCache));
@@ -216,7 +219,7 @@ function createApp(store) {
       args.push(`%${t}%`);
     }
     return q(
-      `SELECT p.id, p.ref, p.name, p.image_url AS imageUrl, p.active, p.category_id AS categoryId,
+      `SELECT p.id, p.ref, p.code, p.name, p.image_url AS imageUrl, p.active, p.category_id AS categoryId,
          c.name AS category,
          (SELECT price_cents FROM product_units u WHERE u.product_id = p.id
             ORDER BY CASE unit WHEN 'piece' THEN 0 ELSE 1 END, qty LIMIT 1) AS priceCents
@@ -234,7 +237,7 @@ function createApp(store) {
     res.json({ product: p });
   });
 
-  // Scan : code-barres d'un conditionnement, ou à défaut référence exacte.
+  // Scan : code-barres d'un conditionnement, ou à défaut référence exacte, puis code article.
   api.get('/scan/:code', user, (req, res) => {
     const code = str(req.params.code, 80);
     let unit = null;
@@ -243,7 +246,8 @@ function createApp(store) {
        WHERE u.ean = ? AND u.ean != '' AND p.active = 1`
     ).get(code);
     if (row) unit = row.unit;
-    else row = q('SELECT id FROM products WHERE ref = ? AND active = 1').get(code);
+    else row = q('SELECT id FROM products WHERE ref = ? AND active = 1').get(code)
+      || q("SELECT id FROM products WHERE code = ? AND code != '' AND active = 1").get(code);
     if (!row) throw new HttpError(404, `Aucun article pour le code ${code}.`);
     res.json({ product: pricing.productDetail(row.id, optionalClient(req)), unit });
   });
@@ -416,11 +420,31 @@ function createApp(store) {
     let specs = [];
     try { specs = JSON.parse(p.specs); } catch {}
     return {
-      id: p.id, ref: p.ref, name: p.name, categoryId: p.category_id, description: p.description, specs,
+      id: p.id, ref: p.ref, code: p.code, name: p.name, categoryId: p.category_id, description: p.description, specs,
       imageUrl: p.image_url, active: !!p.active,
       units: q('SELECT unit, qty, price_cents AS priceCents, ean FROM product_units WHERE product_id = ?').all(id),
     };
   };
+  // Export CSV : même format que l'import, pour compléter prix et codes-barres dans Excel.
+  adm.get('/products/export', (req, res) => {
+    const cell = (v) => (/[";\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v));
+    const rows = [['ref', 'code', 'nom', 'categorie', 'unite', 'qte', 'prix', 'ean']];
+    const products = q(
+      `SELECT p.id, p.ref, p.code, p.name, c.name AS category FROM products p
+       LEFT JOIN categories c ON c.id = p.category_id WHERE p.active = 1 ORDER BY c.sort, c.name, p.ref`
+    ).all();
+    for (const p of products) {
+      const units = q('SELECT * FROM product_units WHERE product_id = ? ORDER BY qty').all(p.id);
+      if (!units.length) rows.push([p.ref, p.code, p.name, p.category || '', 'piece', 1, '', '']);
+      for (const u of units) {
+        rows.push([p.ref, p.code, p.name, p.category || '', u.unit, u.qty, (u.price_cents / 100).toFixed(2).replace('.', ','), u.ean]);
+      }
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="articles.csv"');
+    res.send('\uFEFF' + rows.map((r) => r.map(cell).join(';')).join('\r\n') + '\r\n');
+  });
+
   adm.get('/products', (req, res) => res.json({ products: listProducts(req, true) }));
   adm.get('/products/:id', (req, res) => res.json({ product: adminProduct(Number(req.params.id)) }));
 
@@ -448,15 +472,15 @@ function createApp(store) {
     const dup = q('SELECT id FROM products WHERE ref = ?').get(ref);
     if (dup && dup.id !== id) throw new HttpError(400, `La référence ${ref} existe déjà.`);
     const specs = (Array.isArray(b.specs) ? b.specs : [])
-      .map((s) => [str(s?.[0], 100), str(s?.[1], 300)]).filter((s) => s[0] && s[1]);
-    const vals = [ref, name, b.categoryId ? Number(b.categoryId) : null, str(b.description, 5000),
-      JSON.stringify(specs), /^https:\/\//.test(str(b.imageUrl)) ? str(b.imageUrl) : '', b.active === false ? 0 : 1];
+      .map((s) => [str(s?.[0], 100), str(s?.[1], 300)]).filter((s) => s[0]);
+    const vals = [ref, str(b.code, 40), name, b.categoryId ? Number(b.categoryId) : null, str(b.description, 5000),
+      JSON.stringify(specs), isImage(str(b.imageUrl)) ? str(b.imageUrl) : '', b.active === false ? 0 : 1];
     return tx(() => {
       if (id) {
-        q(`UPDATE products SET ref = ?, name = ?, category_id = ?, description = ?, specs = ?, image_url = ?, active = ? WHERE id = ?`)
+        q(`UPDATE products SET ref = ?, code = ?, name = ?, category_id = ?, description = ?, specs = ?, image_url = ?, active = ? WHERE id = ?`)
           .run(...vals, id);
       } else {
-        id = q(`INSERT INTO products(ref, name, category_id, description, specs, image_url, active) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        id = q(`INSERT INTO products(ref, code, name, category_id, description, specs, image_url, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(...vals).lastInsertRowid;
       }
       writeUnits(id, b.units);
@@ -483,12 +507,13 @@ function createApp(store) {
       return { '': 'piece', piece: 'piece', pc: 'piece', pce: 'piece', boite: 'boite', carton: 'carton', palette: 'palette' }[n];
     };
     const result = tx(() => {
-      let created = 0, updated = 0;
+      let created = 0, updated = 0, noPrice = 0;
       const errors = [];
       const touched = new Set();
       rows.forEach((r, i) => {
         const line = i + 2;
-        const ref = str(col(r, 'ref', 'reference', 'code'), 60);
+        const ref = str(col(r, 'ref', 'reference'), 60);
+        const code = str(col(r, 'code', 'code_article'), 40);
         if (!ref) return errors.push(`Ligne ${line} : référence manquante.`);
         const unit = unitOf(col(r, 'unite', 'conditionnement'));
         if (!unit) return errors.push(`Ligne ${line} : unité inconnue « ${col(r, 'unite', 'conditionnement')} ».`);
@@ -502,27 +527,28 @@ function createApp(store) {
         }
         const specsTxt = col(r, 'caracteristiques', 'specs');
         const specs = specsTxt
-          ? specsTxt.split('|').map((s) => s.split(/:(.*)/s).slice(0, 2).map((x) => (x || '').trim())).filter((s) => s[0] && s[1])
+          ? specsTxt.split('|').map((s) => s.split(/:(.*)/s).slice(0, 2).map((x) => (x || '').trim())).filter((s) => s[0]).map((s) => [s[0], s[1] || ''])
           : null;
         const desc = col(r, 'description');
         const img = col(r, 'image', 'image_url');
         if (!p) {
           if (!name) return errors.push(`Ligne ${line} : nom manquant pour le nouvel article ${ref}.`);
-          const id = q('INSERT INTO products(ref, name, category_id, description, specs, image_url) VALUES (?, ?, ?, ?, ?, ?)')
-            .run(ref, name, catId, str(desc, 5000), JSON.stringify(specs || []), /^https:\/\//.test(img) ? img : '').lastInsertRowid;
+          const id = q('INSERT INTO products(ref, code, name, category_id, description, specs, image_url) VALUES (?, ?, ?, ?, ?, ?, ?)')
+            .run(ref, code, name, catId, str(desc, 5000), JSON.stringify(specs || []), isImage(img) ? img : '').lastInsertRowid;
           p = { id };
           created++;
         } else if (!touched.has(p.id)) {
-          q('UPDATE products SET name = ?, category_id = ?, description = ?, specs = ?, image_url = ? WHERE id = ?').run(
-            name || p.name, catId ?? p.category_id, desc ? str(desc, 5000) : p.description,
-            specs ? JSON.stringify(specs) : p.specs, /^https:\/\//.test(img) ? img : p.image_url, p.id
+          q('UPDATE products SET code = ?, name = ?, category_id = ?, description = ?, specs = ?, image_url = ? WHERE id = ?').run(
+            code || p.code, name || p.name, catId ?? p.category_id, desc ? str(desc, 5000) : p.description,
+            specs ? JSON.stringify(specs) : p.specs, isImage(img) ? img : p.image_url, p.id
           );
           updated++;
         }
         touched.add(p.id);
         const priceTxt = col(r, 'prix', 'prix_ht', 'prix ht');
+        if (priceTxt === '') return void noPrice++; // ligne sans prix : fiche mise à jour, pas de tarif
         const price = Number(String(priceTxt).replace(/[^0-9,.-]/g, '').replace(',', '.'));
-        if (priceTxt === '' || !Number.isFinite(price) || price < 0) {
+        if (!Number.isFinite(price) || price < 0) {
           return errors.push(`Ligne ${line} : prix invalide pour ${ref}.`);
         }
         const ean = str(col(r, 'ean', 'code_barres', 'code-barres', 'codebarre'), 40);
@@ -539,7 +565,7 @@ function createApp(store) {
           .run(p.id, unit, qty, Math.round(price * 100), ean);
       });
       for (const id of touched) store.refreshProductSearch(id);
-      return { created, updated, errors };
+      return { created, updated, noPrice, errors };
     });
     res.json(result);
   });
@@ -639,9 +665,15 @@ if (require.main === module) {
   const dataDir = process.env.DATA_DIR || path.join(ROOT, 'data');
   const store = open(path.join(dataDir, 'commandes.db'));
   const created = ensureAdmin(store);
-  if (process.env.SEED_DEMO !== '0' && !store.q('SELECT 1 AS x FROM products LIMIT 1').get()) {
-    require('./seed')(store);
-    console.log('Données de démonstration chargées (articles, clients et promos fictifs).');
+  if (!store.q('SELECT 1 AS x FROM products LIMIT 1').get()) {
+    if (process.env.SEED_CATALOG !== '0') {
+      const n = require('./catalog')(store);
+      if (n) console.log(`Catalogue Bormann Pro chargé : ${n} articles (sans prix : à compléter dans l'interface PC).`);
+    }
+    if (process.env.SEED_DEMO !== '0') {
+      require('./seed')(store);
+      console.log('Données de démonstration chargées (articles, clients et promos fictifs).');
+    }
   }
   const port = Number(process.env.PORT) || 3000;
   createApp(store).listen(port, () => {

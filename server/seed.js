@@ -79,10 +79,10 @@ module.exports = function seedDemo(store) {
   const { q, tx } = store;
   tx(() => {
     let n = 1;
-    let sort = 0;
     const productIds = [];
-    for (const [cat, items] of Object.entries(CATALOGUE)) {
-      const catId = q('INSERT INTO categories(name, sort) VALUES (?, ?)').run(cat, sort++).lastInsertRowid;
+    // Tous les articles fictifs dans une seule catégorie, pour ne pas les mêler au vrai catalogue.
+    const catId = q('INSERT INTO categories(name, sort) VALUES (?, ?)').run('Démonstration (articles fictifs)', 999).lastInsertRowid;
+    for (const items of Object.values(CATALOGUE)) {
       for (const [name, price, pack, description, specs] of items) {
         const ref = 'DEMO-' + String(n).padStart(3, '0');
         const id = q(

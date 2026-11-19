@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS categories (
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY,
   ref TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  code TEXT NOT NULL DEFAULT '',          -- code article du fournisseur (6 chiffres chez Bormann)
   name TEXT NOT NULL,
   category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
   description TEXT NOT NULL DEFAULT '',
@@ -157,6 +158,11 @@ function open(file) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // Bases créées avant l'ajout du code article
+  if (!db.prepare('PRAGMA table_info(products)').all().some((c) => c.name === 'code')) {
+    db.exec("ALTER TABLE products ADD COLUMN code TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_code ON products(code)');
 
   const cache = new Map();
   const q = (sql) => {
@@ -198,7 +204,7 @@ function open(file) {
     try {
       specs = JSON.parse(p.specs).flat();
     } catch {}
-    const text = normalize([p.ref, p.name, p.category, p.description, ...specs, ...eans].join(' '));
+    const text = normalize([p.ref, p.code, p.name, p.category, p.description, ...specs, ...eans].join(' '));
     q('UPDATE products SET search = ? WHERE id = ?').run(text, id);
   };
 
