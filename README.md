@@ -62,24 +62,30 @@ docker run -d -p 3000:3000 -v commandes-data:/data -e ADMIN_PASSWORD="…" comma
 Le dossier de données (`/data` dans Docker) doit être **persistant** : il contient toute la base
 (`commandes.db`). Le sauvegarder régulièrement.
 
-## Saisir les prix et les codes-barres
+## Fichiers Excel (interface PC)
 
-Interface PC → **Articles et prix** :
+Tout passe par des fichiers Excel `.xlsx` (le CSV reste accepté à l'import). La première ligne contient les noms de colonnes.
 
-1. **Exporter en CSV** : le fichier contient tous les articles, une ligne par conditionnement.
-2. Dans Excel, remplir les colonnes `prix` (HT, pour le conditionnement entier) et `ean` (code-barres).
+**Prix et codes-barres** — onglet « Articles et prix » :
+
+1. **Exporter en Excel** : tous les articles, une ligne par conditionnement.
+2. Remplir les colonnes `prix` (HT, pour le conditionnement entier) et `ean` (code-barres).
    Pour ajouter une boîte, un carton ou une palette, dupliquer la ligne et changer `unite` (`piece`, `boite`, `carton`, `palette`) et `qte`.
-3. **Importer un CSV** : les articles existants sont mis à jour ; une ligne sans prix est ignorée sans erreur.
+3. **Importer un fichier Excel** : les articles existants (même `ref`) sont mis à jour ; une ligne sans prix est ignorée sans erreur.
 
-```
-ref;code;nom;categorie;unite;qte;prix;ean
-BBP5123;070474;Clé à chocs 20V brushless solo;Outillage sans fil;piece;1;89,00;5200000000011
-BBP5123;;;;carton;4;330,00;5200000000028
-```
+Le bouton « Format du fichier » décrit les autres colonnes (description, caractéristiques, photo).
 
-Un article se modifie aussi un par un en cliquant dessus. Le bouton « Format CSV » décrit toutes les colonnes
-(description, caractéristiques, photo). Dans l'application, un article se retrouve par sa référence, son code article
-ou son code-barres.
+**Clients** — onglet « Clients et remises » : export et import avec les colonnes `numero`, `nom`, `tva`, `adresse_siege`,
+`cp_siege`, `localite_siege`, `adresse_livraison`, `cp_livraison`, `localite_livraison`, `horaires`, `telephone`, `email`,
+`responsable`, `tel_responsable`, `contact_compta`, `tel_compta`, `email_compta`, `iban`, `remarques`, `remise`.
+Un client est reconnu par son numéro, sinon par son numéro de TVA ; une cellule vide ne vide pas la fiche existante.
+
+**Commandes** — onglet « Commandes » : « Exporter en Excel » donne les commandes affichées (filtres compris) dans un classeur
+à deux feuilles, « Commandes » (une ligne par commande, avec adresses) et « Lignes » (une ligne par article commandé).
+Le bouton « Excel » d'une commande exporte cette commande seule ; le PDF reste disponible.
+
+**Identifiants** — onglet « Identifiants » : créer, désactiver, changer le mot de passe ou supprimer un identifiant.
+Supprimer un délégué conserve ses commandes et ses clients.
 
 ## Règles de prix
 

@@ -9,6 +9,7 @@ const { hashPassword, publicUser } = createAuth;
 const createPricing = require('./pricing');
 const { orderPdf } = require('./pdf');
 const { parseCsv } = require('./csv');
+const { readRows, sendWorkbook, headerKey } = require('./excel');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -57,7 +58,7 @@ function createApp(store) {
     if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     next();
   });
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '25mb' }));
 
   // --- Fichiers statiques : app mobile sur /, interface PC sur /admin ---
   const noCache = { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') };
@@ -315,7 +316,7 @@ function createApp(store) {
     res.status(201).json({ order: publicOrder(order) });
   });
 
-  api.get('/orders', user, (req, res) => {
+  function findOrders(req) {
     const where = [];
     const args = [];
     if (req.user.role !== 'admin') {
@@ -330,15 +331,19 @@ function createApp(store) {
       where.push('client_id = ?');
       args.push(Number(req.query.client));
     }
+    if (req.query.id) {
+      where.push('id = ?');
+      args.push(Number(req.query.id));
+    }
     for (const t of likeTokens(req.query.q)) {
       where.push('(lower(number) LIKE ? OR lower(client_snapshot) LIKE ? OR lower(user_name) LIKE ?)');
       args.push(`%${t}%`, `%${t}%`, `%${t}%`);
     }
-    const rows = q(
-      `SELECT * FROM orders ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 500`
+    return q(
+      `SELECT * FROM orders ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 5000`
     ).all(...args);
-    res.json({ orders: rows.map(publicOrder) });
-  });
+  }
+  api.get('/orders', user, (req, res) => res.json({ orders: findOrders(req).slice(0, 500).map(publicOrder) }));
 
   api.get('/orders/:id', user, (req, res) => {
     const o = loadOrder(req, req.params.id);
@@ -425,24 +430,156 @@ function createApp(store) {
       units: q('SELECT unit, qty, price_cents AS priceCents, ean FROM product_units WHERE product_id = ?').all(id),
     };
   };
-  // Export CSV : même format que l'import, pour compléter prix et codes-barres dans Excel.
-  adm.get('/products/export', (req, res) => {
-    const cell = (v) => (/[";\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v));
-    const rows = [['ref', 'code', 'nom', 'categorie', 'unite', 'qte', 'prix', 'ean']];
+  // Fichier importé : Excel (.xlsx, envoyé en base64) ou CSV. Colonnes repérées par leur nom.
+  async function uploadedRows(req) {
+    let rows;
+    if (req.body?.xlsx) {
+      try {
+        rows = await readRows(Buffer.from(String(req.body.xlsx), 'base64'));
+      } catch {
+        throw new HttpError(400, 'Fichier Excel illisible. Enregistrez-le au format .xlsx.');
+      }
+    } else {
+      rows = parseCsv(String(req.body?.csv || '')).map((r) =>
+        Object.fromEntries(Object.entries(r).map(([k, v]) => [headerKey(k), v])));
+    }
+    if (!rows.length) throw new HttpError(400, 'Fichier vide ou illisible.');
+    return rows;
+  }
+  const col = (r, ...names) => {
+    for (const n of names) if (r[n] !== undefined && r[n] !== '') return r[n];
+    return '';
+  };
+  const decimal = (v) => Number(String(v).replace(/[^0-9,.-]/g, '').replace(',', '.'));
+
+  // Export Excel des articles : même format que l'import, pour compléter prix et codes-barres.
+  adm.get('/products/export', async (req, res) => {
+    const rows = [];
     const products = q(
       `SELECT p.id, p.ref, p.code, p.name, c.name AS category FROM products p
        LEFT JOIN categories c ON c.id = p.category_id WHERE p.active = 1 ORDER BY c.sort, c.name, p.ref`
     ).all();
     for (const p of products) {
+      const base = { ref: p.ref, code: p.code, nom: p.name, categorie: p.category || '' };
       const units = q('SELECT * FROM product_units WHERE product_id = ? ORDER BY qty').all(p.id);
-      if (!units.length) rows.push([p.ref, p.code, p.name, p.category || '', 'piece', 1, '', '']);
-      for (const u of units) {
-        rows.push([p.ref, p.code, p.name, p.category || '', u.unit, u.qty, (u.price_cents / 100).toFixed(2).replace('.', ','), u.ean]);
+      if (!units.length) rows.push({ ...base, unite: 'piece', qte: 1, prix: null, ean: '' });
+      for (const u of units) rows.push({ ...base, unite: u.unit, qte: u.qty, prix: u.price_cents / 100, ean: u.ean });
+    }
+    await sendWorkbook(res, 'articles.xlsx', [{ name: 'Articles', rows, columns: [
+      { header: 'ref', key: 'ref', width: 20, text: true }, { header: 'code', key: 'code', width: 10, text: true },
+      { header: 'nom', key: 'nom', width: 55 }, { header: 'categorie', key: 'categorie', width: 30 },
+      { header: 'unite', key: 'unite', width: 10 }, { header: 'qte', key: 'qte', width: 8 },
+      { header: 'prix', key: 'prix', width: 12, money: true }, { header: 'ean', key: 'ean', width: 18, text: true },
+    ] }]);
+  });
+
+  // Export Excel des commandes (filtres de la liste, ou une seule commande avec ?id=).
+  adm.get('/orders/export', async (req, res) => {
+    const orders = findOrders(req);
+    const head = [];
+    const lines = [];
+    for (const o of orders) {
+      const c = JSON.parse(o.client_snapshot);
+      const hasDel = c.del_address || c.del_city;
+      const date = o.created_at.slice(0, 16);
+      head.push({
+        numero: o.number, date, statut: STATUS_LABELS[o.status] || o.status, delegue: o.user_name,
+        client: c.name, n_client: c.number, tva: c.vat,
+        adresse: c.hq_address, cp: c.hq_zip, localite: c.hq_city,
+        liv_adresse: hasDel ? c.del_address : c.hq_address, liv_cp: hasDel ? c.del_zip : c.hq_zip,
+        liv_localite: hasDel ? c.del_city : c.hq_city, horaires: c.hours,
+        total_ht: o.total_cents / 100, tva_pct: o.vat_pct,
+        total_ttc: Math.round(o.total_cents * (1 + o.vat_pct / 100)) / 100, remarque: o.note,
+      });
+      for (const l of orderLines(o.id)) {
+        const code = l.product_id ? q('SELECT code FROM products WHERE id = ?').get(l.product_id)?.code || '' : '';
+        lines.push({
+          numero: o.number, date, client: c.name, n_client: c.number, ref: l.ref, code, designation: l.name,
+          qte: l.qty, unite: l.unitLabel, pieces_par_unite: l.unit_qty, pieces: l.qty * l.unit_qty,
+          prix_base: l.base_cents / 100, remise_pct: l.discount_pct, promo: l.promo ? 'oui' : '',
+          prix_net: l.net_cents / 100, total_ht: l.total_cents / 100,
+        });
       }
     }
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="articles.csv"');
-    res.send('\uFEFF' + rows.map((r) => r.map(cell).join(';')).join('\r\n') + '\r\n');
+    const name = orders.length === 1 && req.query.id ? `${orders[0].number}.xlsx` : 'commandes.xlsx';
+    await sendWorkbook(res, name, [
+      { name: 'Commandes', rows: head, columns: [
+        { header: 'N° commande', key: 'numero', width: 18 }, { header: 'Date', key: 'date', width: 17 },
+        { header: 'Statut', key: 'statut', width: 15 }, { header: 'Délégué', key: 'delegue', width: 18 },
+        { header: 'Client', key: 'client', width: 30 }, { header: 'N° client', key: 'n_client', width: 12, text: true },
+        { header: 'TVA', key: 'tva', width: 18 }, { header: 'Adresse siège', key: 'adresse', width: 28 },
+        { header: 'CP', key: 'cp', width: 8, text: true }, { header: 'Localité', key: 'localite', width: 18 },
+        { header: 'Adresse livraison', key: 'liv_adresse', width: 28 }, { header: 'CP livraison', key: 'liv_cp', width: 11, text: true },
+        { header: 'Localité livraison', key: 'liv_localite', width: 18 }, { header: 'Horaires', key: 'horaires', width: 24 },
+        { header: 'Total HT', key: 'total_ht', width: 12, money: true }, { header: 'TVA %', key: 'tva_pct', width: 8 },
+        { header: 'Total TTC', key: 'total_ttc', width: 12, money: true }, { header: 'Remarque', key: 'remarque', width: 40 },
+      ] },
+      { name: 'Lignes', rows: lines, columns: [
+        { header: 'N° commande', key: 'numero', width: 18 }, { header: 'Date', key: 'date', width: 17 },
+        { header: 'Client', key: 'client', width: 30 }, { header: 'N° client', key: 'n_client', width: 12, text: true },
+        { header: 'Référence', key: 'ref', width: 20, text: true }, { header: 'Code article', key: 'code', width: 12, text: true },
+        { header: 'Désignation', key: 'designation', width: 50 }, { header: 'Quantité', key: 'qte', width: 10 },
+        { header: 'Unité', key: 'unite', width: 10 }, { header: 'Pièces / unité', key: 'pieces_par_unite', width: 13 },
+        { header: 'Total pièces', key: 'pieces', width: 12 }, { header: 'Prix de base HT', key: 'prix_base', width: 15, money: true },
+        { header: 'Remise %', key: 'remise_pct', width: 10 }, { header: 'Promo', key: 'promo', width: 8 },
+        { header: 'Prix net HT', key: 'prix_net', width: 13, money: true }, { header: 'Total HT', key: 'total_ht', width: 13, money: true },
+      ] },
+    ]);
+  });
+
+  // Clients : export et import Excel.
+  const CLIENT_COLUMNS = [
+    ['numero', 'number', 12], ['nom', 'name', 32], ['tva', 'vat', 18], ['adresse_siege', 'hq_address', 28],
+    ['cp_siege', 'hq_zip', 9], ['localite_siege', 'hq_city', 18], ['adresse_livraison', 'del_address', 28],
+    ['cp_livraison', 'del_zip', 11], ['localite_livraison', 'del_city', 18], ['horaires', 'hours', 24],
+    ['telephone', 'phone', 16], ['email', 'email', 28], ['responsable', 'manager_name', 22],
+    ['tel_responsable', 'manager_phone', 16], ['contact_compta', 'accounting_name', 22],
+    ['tel_compta', 'accounting_phone', 16], ['email_compta', 'accounting_email', 28], ['iban', 'iban', 24],
+    ['remarques', 'notes', 36],
+  ];
+  adm.get('/clients/export', async (req, res) => {
+    const rows = q('SELECT * FROM clients ORDER BY name COLLATE NOCASE').all().map((c) => ({
+      ...Object.fromEntries(CLIENT_COLUMNS.map(([h, f]) => [h, c[f]])), remise: c.discount_pct,
+    }));
+    await sendWorkbook(res, 'clients.xlsx', [{ name: 'Clients', rows, columns: [
+      ...CLIENT_COLUMNS.map(([h, , width]) => ({ header: h, key: h, width, text: true })),
+      { header: 'remise', key: 'remise', width: 9 },
+    ] }]);
+  });
+  adm.post('/clients/import', async (req, res) => {
+    const rows = await uploadedRows(req);
+    res.json(tx(() => {
+      let created = 0, updated = 0;
+      const errors = [];
+      rows.forEach((r, i) => {
+        const data = Object.fromEntries(CLIENT_COLUMNS.map(([h, f]) => [f, str(r[h])]));
+        data.name ||= str(col(r, 'client', 'societe', 'raison_sociale'));
+        data.number ||= str(col(r, 'n_client', 'numero_client'));
+        const vatKey = data.vat.replace(/[^0-9a-z]/gi, '').toLowerCase();
+        let c = data.number ? q('SELECT * FROM clients WHERE number = ?').get(data.number) : null;
+        if (!c && vatKey) {
+          c = q('SELECT * FROM clients').all().find((x) => x.vat.replace(/[^0-9a-z]/gi, '').toLowerCase() === vatKey) || null;
+        }
+        if (!c && !data.name) return errors.push(`Ligne ${i + 2} : nom du client manquant.`);
+        const discount = r.remise !== undefined && r.remise !== '' ? pct(decimal(r.remise)) : null;
+        let id;
+        if (c) {
+          id = c.id;
+          const set = Object.entries(data).filter(([, v]) => v !== ''); // une cellule vide ne vide pas la fiche
+          for (const [f, v] of set) q(`UPDATE clients SET ${f} = ? WHERE id = ?`).run(v, id);
+          updated++;
+        } else {
+          const fields = Object.keys(data);
+          id = q(`INSERT INTO clients(${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`).run(
+            ...fields.map((f) => data[f])).lastInsertRowid;
+          if (!data.number) q('UPDATE clients SET number = ? WHERE id = ?').run('C' + String(id).padStart(5, '0'), id);
+          created++;
+        }
+        if (discount != null) q('UPDATE clients SET discount_pct = ? WHERE id = ?').run(discount, id);
+        store.refreshClientSearch(id);
+      });
+      return { created, updated, errors };
+    }));
   });
 
   adm.get('/products', (req, res) => res.json({ products: listProducts(req, true) }));
@@ -494,14 +631,9 @@ function createApp(store) {
     res.json({ product: saveProduct(req, Number(req.params.id)) });
   });
 
-  // Import CSV : une ligne par (article, conditionnement).
-  adm.post('/products/import', (req, res) => {
-    const rows = parseCsv(String(req.body?.csv || ''));
-    if (!rows.length) throw new HttpError(400, 'Fichier vide ou illisible.');
-    const col = (r, ...names) => {
-      for (const n of names) if (r[n] !== undefined && r[n] !== '') return r[n];
-      return '';
-    };
+  // Import Excel ou CSV : une ligne par (article, conditionnement).
+  adm.post('/products/import', async (req, res) => {
+    const rows = await uploadedRows(req);
     const unitOf = (v) => {
       const n = normalize(v).replace(/s$/, '');
       return { '': 'piece', piece: 'piece', pc: 'piece', pce: 'piece', boite: 'boite', carton: 'carton', palette: 'palette' }[n];
@@ -513,7 +645,8 @@ function createApp(store) {
       rows.forEach((r, i) => {
         const line = i + 2;
         const ref = str(col(r, 'ref', 'reference'), 60);
-        const code = str(col(r, 'code', 'code_article'), 40);
+        let code = str(col(r, 'code', 'code_article'), 40);
+        if (/^\d{1,5}$/.test(code)) code = code.padStart(6, '0'); // Excel retire les zéros de tête
         if (!ref) return errors.push(`Ligne ${line} : référence manquante.`);
         const unit = unitOf(col(r, 'unite', 'conditionnement'));
         if (!unit) return errors.push(`Ligne ${line} : unité inconnue « ${col(r, 'unite', 'conditionnement')} ».`);
@@ -545,13 +678,13 @@ function createApp(store) {
           updated++;
         }
         touched.add(p.id);
-        const priceTxt = col(r, 'prix', 'prix_ht', 'prix ht');
+        const priceTxt = col(r, 'prix', 'prix_ht');
         if (priceTxt === '') return void noPrice++; // ligne sans prix : fiche mise à jour, pas de tarif
-        const price = Number(String(priceTxt).replace(/[^0-9,.-]/g, '').replace(',', '.'));
+        const price = decimal(priceTxt);
         if (!Number.isFinite(price) || price < 0) {
           return errors.push(`Ligne ${line} : prix invalide pour ${ref}.`);
         }
-        const ean = str(col(r, 'ean', 'code_barres', 'code-barres', 'codebarre'), 40);
+        const ean = str(col(r, 'ean', 'code_barres', 'codebarre'), 40);
         if (ean) {
           const clash = q(
             `SELECT p.ref FROM product_units x JOIN products p ON p.id = x.product_id
@@ -636,6 +769,15 @@ function createApp(store) {
       q('DELETE FROM sessions WHERE user_id = ?').run(id);
     }
     if (!active) q('DELETE FROM sessions WHERE user_id = ?').run(id);
+    res.json({ ok: true });
+  });
+
+  adm.delete('/users/:id', (req, res) => {
+    const id = Number(req.params.id);
+    if (id === req.user.id) throw new HttpError(400, 'Vous ne pouvez pas supprimer votre propre compte.');
+    // Ses commandes et ses clients sont conservés (le nom du délégué reste sur les commandes).
+    const r = q('DELETE FROM users WHERE id = ?').run(id);
+    if (!r.changes) throw new HttpError(404, 'Utilisateur introuvable.');
     res.json({ ok: true });
   });
 

@@ -144,3 +144,59 @@ test('import CSV : crée et met à jour articles et conditionnements', async () 
   assert.deepEqual(scan.product.specs[0], ['Longueur', '250 mm']);
   assert.equal((await call('jean', 'GET', '/products?q=demo-002')).data.products[0].priceCents, 480);
 });
+
+test('Excel : export des commandes, import des prix et des clients', async () => {
+  const ExcelJS = require('exceljs');
+  const load = async (path) => {
+    const res = await call('admin', 'GET', path);
+    assert.equal(res.status, 200);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(res.data);
+    return wb;
+  };
+  const orders = await load('/admin/orders/export');
+  assert.equal(orders.getWorksheet('Commandes').getRow(2).getCell(1).value, 'CMD-' + new Date().getFullYear() + '-00001');
+  assert.equal(orders.getWorksheet('Lignes').getRow(2).getCell(5).value, 'DEMO-022');
+  assert.equal((await call('jean', 'GET', '/admin/orders/export')).status, 403);
+
+  // Tarif : on reprend l'export, on change un prix, on ajoute un code-barres, on réimporte.
+  const articles = await load('/admin/products/export');
+  const ws = articles.getWorksheet('Articles');
+  let row;
+  ws.eachRow((r) => { if (r.getCell(1).value === 'DEMO-003' && r.getCell(5).value === 'piece') row = r; });
+  row.getCell(7).value = 5.25;
+  row.getCell(8).value = 5200000000998; // saisi comme un nombre dans Excel
+  const xlsx = Buffer.from(await articles.xlsx.writeBuffer()).toString('base64');
+  const imp = await call('admin', 'POST', '/admin/products/import', { xlsx });
+  assert.equal(imp.status, 200);
+  assert.deepEqual(imp.data.errors, []);
+  const scan = (await call('jean', 'GET', '/scan/5200000000998')).data;
+  assert.equal(scan.product.ref, 'DEMO-003');
+  assert.equal(scan.product.units.find((u) => u.unit === 'piece').baseCents, 525);
+
+  const wb = new ExcelJS.Workbook();
+  wb.addWorksheet('Clients').addRows([
+    ['Numéro', 'Nom', 'TVA', 'Localité siège', 'Remise'],
+    ['', 'Import SA', 'BE 0888.888.888', 'Wavre', 12.5],
+    ['C00002', '', '', 'Ixelles', ''],
+  ]);
+  const ci = await call('admin', 'POST', '/admin/clients/import', { xlsx: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') });
+  assert.deepEqual([ci.data.created, ci.data.updated, ci.data.errors.length], [1, 1, 0]);
+  const found = (await call('admin', 'GET', '/clients?q=0888888888')).data.clients[0];
+  assert.equal(found.discountPct, 12.5);
+  assert.equal((await call('admin', 'GET', '/clients/2')).data.client.hq_city, 'Ixelles');
+});
+
+test('identifiants : suppression par un administrateur, commandes conservées', async () => {
+  const users = (await call('admin', 'GET', '/admin/users')).data.users;
+  const jean = users.find((u) => u.username === 'jean');
+  const admin = users.find((u) => u.username === 'admin');
+  assert.equal((await call('admin', 'DELETE', `/admin/users/${admin.id}`)).status, 400);
+  assert.equal((await call('lea', 'DELETE', `/admin/users/${jean.id}`)).status, 403);
+  assert.equal((await call('admin', 'DELETE', `/admin/users/${jean.id}`)).status, 200);
+  assert.equal((await call('jean', 'GET', '/orders')).status, 401); // sa session est fermée
+  assert.equal((await call('x', 'POST', '/login', { username: 'jean', password: 'jean-password' })).status, 401);
+  const orders = (await call('admin', 'GET', '/orders')).data.orders;
+  assert.equal(orders.length, 1);
+  assert.equal(orders[0].userName, 'Jean');
+});

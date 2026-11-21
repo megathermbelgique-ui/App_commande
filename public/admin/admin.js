@@ -97,7 +97,7 @@ const TABS = {
   categories: ['Catégories', categoriesTab],
   clients: ['Clients et remises', clientsTab],
   promos: ['Promos', promosTab],
-  utilisateurs: ['Utilisateurs', usersTab],
+  utilisateurs: ['Identifiants', usersTab],
   parametres: ['Paramètres', settingsTab],
 };
 let main;
@@ -125,6 +125,7 @@ async function ordersTab() {
     h('div', { class: 'toolbar' }, h('h2', {}, 'Commandes reçues'),
       search,
       select([['', 'Tous les statuts'], ...STATUSES], orderFilter.status, { onchange: (e) => { orderFilter.status = e.target.value; reload(); } }),
+      h('a', { class: 'btn', href: '/api/admin/orders/export?' + params }, 'Exporter en Excel'),
       h('button', { class: 'btn', onclick: reload }, 'Actualiser')),
     table(['N°', 'Date', 'Client', 'Délégué', { num: 'Total HT' }, 'Statut', 'PDF'], orders.map((o) =>
       h('tr', { class: 'click', onclick: () => orderModal(o.id).catch(oops) },
@@ -168,6 +169,7 @@ async function orderModal(id) {
     o.note ? h('div', { class: 'notice' }, h('b', {}, 'Remarque : '), o.note) : null,
   ], { extra: [
     h('a', { class: 'btn', href: `/api/orders/${o.id}/pdf`, target: '_blank', rel: 'noopener' }, 'Ouvrir le PDF'),
+    h('a', { class: 'btn', href: `/api/admin/orders/export?id=${o.id}` }, 'Excel'),
     h('a', { class: 'btn primary', href: `/api/orders/${o.id}/pdf?dl=1` }, 'Télécharger le PDF'),
   ] });
 }
@@ -179,27 +181,17 @@ async function productsTab() {
     api('/admin/products?' + new URLSearchParams(productFilter)), api('/categories')]);
   const search = h('input', { type: 'search', placeholder: 'Référence, nom, code-barres…', value: productFilter.q,
     onchange: () => { productFilter.q = search.value; reload(); } });
-  const file = h('input', { type: 'file', accept: '.csv,text/csv', hidden: true, onchange: async () => {
-    if (!file.files[0]) return;
-    try {
-      const r = await api('/admin/products/import', { method: 'POST', body: { csv: await file.files[0].text() } });
-      modal('Import terminé', [
-        h('div', { class: 'notice ok' }, `${r.created} article(s) créé(s), ${r.updated} mis à jour.`,
-          r.noPrice ? ` ${r.noPrice} ligne(s) sans prix : fiche conservée, pas de tarif.` : ''),
-        r.errors.length ? h('div', { class: 'notice' }, h('b', {}, `${r.errors.length} ligne(s) ignorée(s) :`), h('pre', {}, r.errors.join('\n'))) : null]);
-      reload();
-    } catch (e) {
-      oops(e);
-    }
-  } });
+  const file = importInput('/admin/products/import', (r) => [
+    `${r.created} article(s) créé(s), ${r.updated} mis à jour.`,
+    r.noPrice ? ` ${r.noPrice} ligne(s) sans prix : fiche conservée, pas de tarif.` : '']);
   main.replaceChildren(
     h('div', { class: 'toolbar' }, h('h2', {}, 'Articles et prix'), search,
       select([['', 'Toutes les catégories'], ...categories.map((c) => [c.id, c.name])], productFilter.category,
         { onchange: (e) => { productFilter.category = e.target.value; reload(); } }),
       file,
-      h('button', { class: 'btn', onclick: importHelp }, 'Format CSV'),
-      h('a', { class: 'btn', href: '/api/admin/products/export' }, 'Exporter en CSV'),
-      h('button', { class: 'btn', onclick: () => file.click() }, 'Importer un CSV'),
+      h('button', { class: 'btn', onclick: importHelp }, 'Format du fichier'),
+      h('a', { class: 'btn', href: '/api/admin/products/export' }, 'Exporter en Excel'),
+      h('button', { class: 'btn', onclick: () => file.click() }, 'Importer un fichier Excel'),
       h('button', { class: 'btn primary', onclick: () => productModal(null, categories) }, 'Nouvel article')),
     table(['Référence', 'Code', 'Nom', 'Catégorie', { num: 'Prix pièce HT' }, 'État'], products.map((p) =>
       h('tr', { class: 'click' + (p.active ? '' : ' off'), onclick: () => productModal(p.id, categories).catch(oops) },
@@ -209,22 +201,49 @@ async function productsTab() {
     products.length >= 300 ? h('p', { class: 'muted' }, 'Affichage limité à 300 articles : affinez la recherche.') : null);
 }
 
+// Bouton d'import : fichier Excel (.xlsx) ou CSV, envoyé au serveur puis compte rendu.
+function importInput(url, summary) {
+  const file = h('input', { type: 'file', accept: '.xlsx,.csv', hidden: true, onchange: async () => {
+    const f = file.files[0];
+    file.value = '';
+    if (!f) return;
+    try {
+      let body;
+      if (/\.csv$/i.test(f.name)) body = { csv: await f.text() };
+      else if (/\.xlsx$/i.test(f.name)) {
+        const bytes = new Uint8Array(await f.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        body = { xlsx: btoa(bin) };
+      } else throw new Error('Format non reconnu : choisissez un fichier .xlsx ou .csv (un ancien .xls doit être réenregistré en .xlsx).');
+      const r = await api(url, { method: 'POST', body });
+      modal('Import terminé', [
+        h('div', { class: 'notice ok' }, summary(r)),
+        r.errors.length ? h('div', { class: 'notice' }, h('b', {}, `${r.errors.length} ligne(s) ignorée(s) :`), h('pre', {}, r.errors.join('\n'))) : null]);
+      reload();
+    } catch (e) {
+      oops(e);
+    }
+  } });
+  return file;
+}
+
 function importHelp() {
   const sample = 'ref;code;nom;categorie;description;unite;qte;prix;ean;caracteristiques\n' +
     'ABC123;012345;Tournevis plat 5,5 x 100;Tournevis;Lame Cr-V;piece;1;3,90;5200000000011;Empreinte: Plate | Longueur: 100 mm\n' +
     'ABC123;;;;;boite;10;37,00;5200000000028;\n' +
     'ABC123;;;;;carton;60;210,00;5200000000035;\n';
-  modal('Format du fichier CSV', [
-    h('p', {}, 'Une ligne par article et par conditionnement. Séparateur « ; » (export Excel « CSV »). ',
+  modal('Format du fichier (Excel ou CSV)', [
+    h('p', {}, 'Fichier Excel (.xlsx) ou CSV, première ligne = noms des colonnes. Une ligne par article et par conditionnement. ',
       'Un article déjà existant (même référence) est mis à jour ; ses prix sont remplacés par ceux du fichier. ',
-      'Le plus simple : « Exporter en CSV », compléter les colonnes prix et ean dans Excel, puis réimporter le fichier.'),
+      'Le plus simple : « Exporter en Excel », compléter les colonnes prix et ean, puis réimporter le fichier.'),
     h('ul', {},
       h('li', {}, h('b', {}, 'ref'), ' (obligatoire), ', h('b', {}, 'code'), ' (code article du fournisseur), ', h('b', {}, 'nom'), ' (obligatoire pour un nouvel article), ', h('b', {}, 'categorie'), ', ', h('b', {}, 'description')),
       h('li', {}, h('b', {}, 'unite'), ' : piece, boite, carton ou palette — ', h('b', {}, 'qte'), ' : nombre de pièces dans ce conditionnement'),
       h('li', {}, h('b', {}, 'prix'), ' : prix HT du conditionnement entier — ', h('b', {}, 'ean'), ' : code-barres de ce conditionnement'),
       h('li', {}, h('b', {}, 'caracteristiques'), ' : « Nom: valeur | Nom: valeur » — ', h('b', {}, 'image'), ' : adresse https d\'une photo')),
     h('pre', {}, sample),
-    h('a', { class: 'btn', download: 'modele-articles.csv', href: URL.createObjectURL(new Blob(['﻿' + sample], { type: 'text/csv' })) }, 'Télécharger ce modèle'),
+    h('p', { class: 'muted' }, 'Exemple (les mêmes colonnes dans Excel) :'),
   ]);
 }
 
@@ -305,9 +324,13 @@ let clientQuery = '';
 async function clientsTab() {
   const [{ clients }, { users }] = await Promise.all([api('/clients?q=' + encodeURIComponent(clientQuery)), api('/admin/users')]);
   const search = h('input', { type: 'search', placeholder: 'Nom, TVA, n° client, ville…', value: clientQuery, onchange: () => { clientQuery = search.value; reload(); } });
+  const clientFile = importInput('/admin/clients/import', (r) => `${r.created} client(s) créé(s), ${r.updated} mis à jour.`);
   const userName = (id) => users.find((u) => u.id === id)?.name || users.find((u) => u.id === id)?.username || 'Tous';
   main.replaceChildren(
     h('div', { class: 'toolbar' }, h('h2', {}, 'Clients et remises'), search,
+      clientFile,
+      h('a', { class: 'btn', href: '/api/admin/clients/export' }, 'Exporter en Excel'),
+      h('button', { class: 'btn', onclick: () => clientFile.click() }, 'Importer un fichier Excel'),
       h('button', { class: 'btn primary', onclick: () => clientModal(null, users).catch(oops) }, 'Nouveau client')),
     table(['N°', 'Nom', 'TVA', 'Localité', 'Délégué', { num: 'Remise générale' }, 'État'], clients.map((c) =>
       h('tr', { class: 'click' + (c.active ? '' : ' off'), onclick: () => clientModal(c.id, users).catch(oops) },
@@ -420,7 +443,7 @@ function promoModal(p) {
 async function usersTab() {
   const { users } = await api('/admin/users');
   main.replaceChildren(
-    h('div', { class: 'toolbar' }, h('h2', {}, 'Utilisateurs'), h('button', { class: 'btn primary', onclick: () => userModal(null) }, 'Nouvel utilisateur')),
+    h('div', { class: 'toolbar' }, h('h2', {}, 'Identifiants'), h('button', { class: 'btn primary', onclick: () => userModal(null) }, 'Nouvel identifiant')),
     table(["Nom d'utilisateur", 'Nom', 'Rôle', 'État'], users.map((u) =>
       h('tr', { class: 'click' + (u.active ? '' : ' off'), onclick: () => userModal(u) },
         h('td', {}, h('b', {}, u.username)), h('td', {}, u.name), h('td', {}, u.role === 'admin' ? 'Administrateur' : 'Délégué'),
@@ -434,7 +457,7 @@ function userModal(u) {
   const role = select([['delegue', 'Délégué (application mobile)'], ['admin', 'Administrateur (interface PC + application)']], u?.role || 'delegue');
   const pass = h('input', { type: 'password', autocomplete: 'new-password', required: !u, minlength: 8, placeholder: u ? 'Laisser vide pour ne pas changer' : '8 caractères minimum' });
   const active = check('Compte actif', u ? u.active : true);
-  modal(u ? `Utilisateur ${u.username}` : 'Nouvel utilisateur', [
+  modal(u ? `Identifiant ${u.username}` : 'Nouvel identifiant', [
     h('div', { class: 'grid2' }, f("Nom d'utilisateur *", username), f('Nom complet', name)),
     h('div', { class: 'grid2' }, f('Rôle', role), f(u ? 'Nouveau mot de passe' : 'Mot de passe *', pass)),
     u ? active.el : null,
@@ -443,7 +466,16 @@ function userModal(u) {
     if (pass.value) body.password = pass.value;
     await api(u ? `/admin/users/${u.id}` : '/admin/users', { method: u ? 'PUT' : 'POST', body });
     reload();
-  } });
+  }, extra: u && u.id !== me.id ? [h('button', { class: 'btn danger', type: 'button', onclick: async (e) => {
+    if (!confirm(`Supprimer définitivement l'identifiant « ${u.username} » ?\nSes commandes et ses clients sont conservés.`)) return;
+    try {
+      await api(`/admin/users/${u.id}`, { method: 'DELETE' });
+      e.target.closest('dialog').close();
+      reload();
+    } catch (err) {
+      oops(err);
+    }
+  } }, 'Supprimer cet identifiant')] : [] });
 }
 
 // ---------- Paramètres ----------
