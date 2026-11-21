@@ -62,8 +62,24 @@ function modal(title, body, { onSave, saveLabel = 'Enregistrer', extra = [] } = 
 
 const oops = (e) => {
   if (e.status === 401) return login();
-  alert(e.message);
+  modal('Action impossible', h('p', {}, e.message));
 };
+
+// Confirmation intégrée à la page.
+function ask(text, okLabel = 'Confirmer') {
+  return new Promise((resolve) => {
+    let ok = false;
+    const dlg = modal('Confirmation', h('p', { style: { whiteSpace: 'pre-line' } }, text), { saveLabel: okLabel, onSave: async () => { ok = true; } });
+    dlg.addEventListener('close', () => resolve(ok));
+  });
+}
+
+// Lien de téléchargement (PDF, Excel). Dans la page de démonstration, le fichier est fabriqué sur place.
+const DEMO = window.__DEMO__;
+function fileLink(cls, url, label) {
+  if (!DEMO) return h('a', { class: cls, href: url }, label);
+  return h('button', { class: cls, type: 'button', onclick: () => DEMO.download(url).catch(oops) }, label);
+}
 
 // ---------- Connexion ----------
 function login(message = '') {
@@ -87,7 +103,8 @@ function login(message = '') {
   } },
     h('h1', {}, 'Administration des commandes'),
     f("Nom d'utilisateur", user), f('Mot de passe', pass), error,
-    h('button', { class: 'btn primary', type: 'submit' }, 'Se connecter'))));
+    h('button', { class: 'btn primary', type: 'submit' }, 'Se connecter'),
+    DEMO ? h('p', { class: 'muted' }, 'Démonstration : entrez n\'importe quel nom et mot de passe. Les modifications restent sur cet appareil.') : null)));
 }
 
 // ---------- Structure ----------
@@ -125,7 +142,7 @@ async function ordersTab() {
     h('div', { class: 'toolbar' }, h('h2', {}, 'Commandes reçues'),
       search,
       select([['', 'Tous les statuts'], ...STATUSES], orderFilter.status, { onchange: (e) => { orderFilter.status = e.target.value; reload(); } }),
-      h('a', { class: 'btn', href: '/api/admin/orders/export?' + params }, 'Exporter en Excel'),
+      fileLink('btn', '/api/admin/orders/export?' + params, 'Exporter en Excel'),
       h('button', { class: 'btn', onclick: reload }, 'Actualiser')),
     table(['N°', 'Date', 'Client', 'Délégué', { num: 'Total HT' }, 'Statut', 'PDF'], orders.map((o) =>
       h('tr', { class: 'click', onclick: () => orderModal(o.id).catch(oops) },
@@ -139,7 +156,7 @@ async function ordersTab() {
             await api(`/admin/orders/${o.id}`, { method: 'PATCH', body: { status: e.target.value } }).catch(oops);
           } })),
         h('td', { onclick: (e) => e.stopPropagation() },
-          h('a', { class: 'btn small', href: `/api/orders/${o.id}/pdf?dl=1` }, 'Télécharger')))),
+          fileLink('btn small', `/api/orders/${o.id}/pdf?dl=1`, 'Télécharger')))),
       'Aucune commande.'));
 }
 
@@ -168,9 +185,9 @@ async function orderModal(id) {
       h('div', { class: 'big' }, h('span', {}, 'Total TTC'), h('span', {}, eur(o.totalCents + vat)))),
     o.note ? h('div', { class: 'notice' }, h('b', {}, 'Remarque : '), o.note) : null,
   ], { extra: [
-    h('a', { class: 'btn', href: `/api/orders/${o.id}/pdf`, target: '_blank', rel: 'noopener' }, 'Ouvrir le PDF'),
-    h('a', { class: 'btn', href: `/api/admin/orders/export?id=${o.id}` }, 'Excel'),
-    h('a', { class: 'btn primary', href: `/api/orders/${o.id}/pdf?dl=1` }, 'Télécharger le PDF'),
+    DEMO ? null : h('a', { class: 'btn', href: `/api/orders/${o.id}/pdf`, target: '_blank', rel: 'noopener' }, 'Ouvrir le PDF'),
+    fileLink('btn', `/api/admin/orders/export?id=${o.id}`, 'Excel'),
+    fileLink('btn primary', `/api/orders/${o.id}/pdf?dl=1`, 'Télécharger le PDF'),
   ] });
 }
 
@@ -190,7 +207,7 @@ async function productsTab() {
         { onchange: (e) => { productFilter.category = e.target.value; reload(); } }),
       file,
       h('button', { class: 'btn', onclick: importHelp }, 'Format du fichier'),
-      h('a', { class: 'btn', href: '/api/admin/products/export' }, 'Exporter en Excel'),
+      fileLink('btn', '/api/admin/products/export', 'Exporter en Excel'),
       h('button', { class: 'btn', onclick: () => file.click() }, 'Importer un fichier Excel'),
       h('button', { class: 'btn primary', onclick: () => productModal(null, categories) }, 'Nouvel article')),
     table(['Référence', 'Code', 'Nom', 'Catégorie', { num: 'Prix pièce HT' }, 'État'], products.map((p) =>
@@ -315,7 +332,7 @@ async function categoriesTab() {
         h('td', { class: 'num' },
           h('button', { class: 'btn small', onclick: () => api(`/admin/categories/${c.id}`, { method: 'PUT', body: { name: n.value, sort: Number(s.value) } }).then(reload, oops) }, 'Enregistrer'), ' ',
           h('button', { class: 'btn small danger', disabled: c.count > 0, title: c.count ? 'Catégorie non vide' : '',
-            onclick: () => confirm(`Supprimer la catégorie « ${c.name} » ?`) && api(`/admin/categories/${c.id}`, { method: 'DELETE' }).then(reload, oops) }, 'Supprimer')));
+            onclick: async () => (await ask(`Supprimer la catégorie « ${c.name} » ?`, 'Supprimer')) && api(`/admin/categories/${c.id}`, { method: 'DELETE' }).then(reload, oops) }, 'Supprimer')));
     })));
 }
 
@@ -329,7 +346,7 @@ async function clientsTab() {
   main.replaceChildren(
     h('div', { class: 'toolbar' }, h('h2', {}, 'Clients et remises'), search,
       clientFile,
-      h('a', { class: 'btn', href: '/api/admin/clients/export' }, 'Exporter en Excel'),
+      fileLink('btn', '/api/admin/clients/export', 'Exporter en Excel'),
       h('button', { class: 'btn', onclick: () => clientFile.click() }, 'Importer un fichier Excel'),
       h('button', { class: 'btn primary', onclick: () => clientModal(null, users).catch(oops) }, 'Nouveau client')),
     table(['N°', 'Nom', 'TVA', 'Localité', 'Délégué', { num: 'Remise générale' }, 'État'], clients.map((c) =>
@@ -431,9 +448,10 @@ function promoModal(p) {
       reload();
     },
     extra: p ? [h('button', { class: 'btn danger', type: 'button', onclick: async (e) => {
-      if (!confirm('Supprimer cette promo ?')) return;
+      const dlg = e.target.closest('dialog');
+      if (!(await ask('Supprimer cette promo ?', 'Supprimer'))) return;
       await api(`/admin/promos/${p.id}`, { method: 'DELETE' }).catch(oops);
-      e.target.closest('dialog').close();
+      dlg.close();
       reload();
     } }, 'Supprimer')] : [],
   });
@@ -467,10 +485,11 @@ function userModal(u) {
     await api(u ? `/admin/users/${u.id}` : '/admin/users', { method: u ? 'PUT' : 'POST', body });
     reload();
   }, extra: u && u.id !== me.id ? [h('button', { class: 'btn danger', type: 'button', onclick: async (e) => {
-    if (!confirm(`Supprimer définitivement l'identifiant « ${u.username} » ?\nSes commandes et ses clients sont conservés.`)) return;
+    const dlg = e.target.closest('dialog');
+    if (!(await ask(`Supprimer définitivement l'identifiant « ${u.username} » ?\nSes commandes et ses clients sont conservés.`, 'Supprimer'))) return;
     try {
       await api(`/admin/users/${u.id}`, { method: 'DELETE' });
-      e.target.closest('dialog').close();
+      dlg.close();
       reload();
     } catch (err) {
       oops(err);

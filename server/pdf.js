@@ -14,9 +14,10 @@ const frDate = (iso) => {
 };
 
 // Écrit le bon de commande dans `out` (flux inscriptible).
-function orderPdf(order, lines, settings, out) {
-  const doc = new PDFDocument({ size: 'A4', margin: 40, info: { Title: `Commande ${order.number}` } });
-  doc.pipe(out);
+// `Doc` : classe PDFDocument à utiliser (version navigateur dans la page de démonstration).
+function orderPdf(order, lines, settings, out, Doc = PDFDocument) {
+  const doc = new Doc({ size: 'A4', margin: 40, info: { Title: `Commande ${order.number}` } });
+  if (out) doc.pipe(out);
   const c = order.client;
   const L = 40;
   const R = 555;
@@ -116,6 +117,7 @@ function orderPdf(order, lines, settings, out) {
     doc.fillColor('#000').font('Helvetica').fontSize(10).text(order.note, L, y + 20, { width: R - L });
   }
   doc.end();
+  return doc;
 }
 
 module.exports = { orderPdf };

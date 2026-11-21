@@ -73,5 +73,71 @@ const html = `<title>Commandes Bormann Démo</title>
 `;
 if (html.split('</script>').length !== 2) throw new Error('balise script fermante dans le code');
 fs.writeFileSync(path.join(OUT, 'index.html'), html);
+
+// ---------- Démonstration de l'interface PC (demo/dist-admin) ----------
+const ADM = path.join(ROOT, 'demo', 'dist-admin');
+fs.rmSync(ADM, { recursive: true, force: true });
+fs.mkdirSync(ADM, { recursive: true });
+const pricing = require('../server/pricing')(store);
+const users = [
+  { id: 1, username: 'admin', name: 'Administrateur', role: 'admin', active: true },
+  { id: 2, username: 'jean', name: 'Jean Dupont', role: 'delegue', active: true },
+  { id: 3, username: 'lea', name: 'Léa Martin', role: 'delegue', active: true },
+];
+const firstDemo = priced[0].id;
+const sample = [
+  [1, 2, 'recue', 0, [[19, 'carton', 2], [15, 'boite', 3], [0, 'carton', 1]], 'Livrer avant 10h.'],
+  [2, 3, 'preparation', 1, [[21, 'carton', 1], [24, 'carton', 4], [4, 'boite', 5]], ''],
+  [3, 2, 'expediee', 3, [[20, 'palette', 1]], 'Prévenir le magasin la veille.'],
+  [1, 2, 'livree', 9, [[10, 'carton', 6], [18, 'carton', 2], [27, 'carton', 3]], ''],
+  [4, 3, 'livree', 16, [[22, 'carton', 3], [16, 'boite', 10]], ''],
+];
+const orders = sample.map(([clientId, userId, status, daysAgo, items, note], i) => {
+  const c = q('SELECT * FROM clients WHERE id = ?').get(clientId);
+  const quote = pricing.quote(c, items.map(([n, unit, qty]) => ({ productId: firstDemo + n, unit, qty })));
+  const id = sample.length - i;
+  const when = new Date(Date.now() - daysAgo * 86400e3 - i * 3700e3);
+  return {
+    id, number: `CMD-${when.getFullYear()}-${String(id).padStart(5, '0')}`, status,
+    statusLabel: { recue: 'Reçue', preparation: 'En préparation', expediee: 'Expédiée', livree: 'Livrée' }[status],
+    note, totalCents: quote.totalCents, vatPct: 21, createdAt: when.toISOString().slice(0, 19).replace('T', ' '),
+    clientId, userName: users.find((u) => u.id === userId).name, client: clients.find((x) => x.id === clientId), lines: quote.lines,
+  };
+});
+fs.writeFileSync(path.join(ADM, 'data.json'), JSON.stringify({
+  categories: q('SELECT id, name, sort FROM categories ORDER BY sort, name').all(),
+  products: products.map((p) => ({ ...p, active: true })),
+  clients: clients.map((c, i) => ({ ...c, delegateId: i < 2 ? 2 : null, discounts: [] })),
+  promos, users, orders, settings: store.settings(),
+}));
+fs.copyFileSync(path.join(ROOT, 'node_modules/exceljs/dist/exceljs.min.js'), path.join(ADM, 'exceljs.min.js'));
+fs.copyFileSync(path.join(ROOT, 'node_modules/pdfkit/js/pdfkit.standalone.js'), path.join(ADM, 'pdfkit.standalone.js'));
+const pdfSrc = read('server/pdf.js').replace(/^'use strict';$/m, '').replace(/^const .*require\(.*$/gm, '').replace(/^module\.exports.*$/m, '');
+const admJs = [
+  strip(read('public/shared/ui.js')).replace('async function api(', 'async function serverApi('),
+  strip(read('public/shared/ean.js')),
+  read('demo/demo-admin-api.js'),
+  `const orderPdf = (() => { const STATUS_LABELS = D_STATUS;\n${pdfSrc}\nreturn orderPdf; })();`,
+  strip(read('public/admin/admin.js')),
+].join('\n');
+const admCss = read('public/admin/admin.css') + `
+/* Page de démonstration */
+:root { color-scheme: light; }
+body { background: var(--bg); color: var(--ink); }
+header.bar { top: env(safe-area-inset-top, 0px); flex-wrap: wrap; row-gap: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px)); }
+@media (max-width: 700px) { header.bar h1 { padding-top: 10px; } nav { flex-basis: 100%; order: 3; } .toolbar input, .toolbar select { min-width: 0; flex: 1 1 140px; } }
+`;
+const admHtml = `<title>Commandes Bormann PC Démo</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>${admCss}</style>
+<div id="root"></div>
+<script>(() => {\n${admJs}\n})();</script>
+`;
+if (admHtml.split('</script>').length !== 2) throw new Error('balise script fermante dans le code (admin)');
+fs.writeFileSync(path.join(ADM, 'index.html'), admHtml);
+console.log('Interface PC : ' + fs.readdirSync(ADM).map((f) => `${f} ${(fs.statSync(path.join(ADM, f)).size / 1024).toFixed(0)} Ko`).join(', '));
+
 const sizes = fs.readdirSync(OUT).map((f) => `${f} ${(fs.statSync(path.join(OUT, f)).size / 1024).toFixed(0)} Ko`);
 console.log(`${products.length} articles, ${files.length} photos\n` + sizes.join('\n'));
