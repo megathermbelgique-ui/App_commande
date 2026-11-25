@@ -224,3 +224,104 @@ test('implantations : liste au mètre, détail chiffré pour le client, gestion 
   assert.equal((await call('admin', 'DELETE', `/admin/implantations/${made.data.id}`)).status, 200);
   assert.equal((await call('lea', 'GET', `/implantations/${made.data.id}`)).status, 404);
 });
+
+test('conditionnements : avantage affiché et conseil au délégué', async () => {
+  const p = (await call('lea', 'GET', '/products/5')).data.product; // pièce 9,80 ; boîte de 10 à -5 %
+  assert.equal(p.units.find((u) => u.unit === 'piece').saving, null);
+  assert.equal(p.units.find((u) => u.unit === 'boite').saving.label, '-5 %');
+  // pourcentage qui ne tombe pas rond : l'écart est donné en euros par pièce
+  const odd = (await call('lea', 'GET', '/products/2')).data.product;
+  assert.equal(odd.units.find((u) => u.unit === 'boite').saving.label, '-0,81 € par pièce');
+  const near = (await call('lea', 'POST', '/quote', { clientId: 3, lines: [{ productId: 5, unit: 'piece', qty: 8 }] })).data.lines[0];
+  assert.match(near.hint.text, /Ajoutez 2 pièces pour avoir le prix par boîte \(-5 %\)/);
+  assert.deepEqual([near.hint.action.unit, near.hint.action.qty], ['boite', 1]);
+  const multiple = (await call('lea', 'POST', '/quote', { clientId: 3, lines: [{ productId: 5, unit: 'piece', qty: 20 }] })).data.lines[0];
+  assert.deepEqual([multiple.hint.action.unit, multiple.hint.action.qty], ['boite', 2]);
+  const far = (await call('lea', 'POST', '/quote', { clientId: 3, lines: [{ productId: 5, unit: 'piece', qty: 3 }] })).data.lines[0];
+  assert.equal(far.hint, null);
+});
+
+test('implantation : remise supplémentaire sur les articles du modèle seulement, groupe conservé dans la commande', async () => {
+  const plan = (await call('admin', 'GET', '/admin/implantations')).data.implantations.find((x) => x.name === 'Électroportatif');
+  const full = (await call('admin', 'GET', `/admin/implantations/${plan.id}`)).data.implantation;
+  await call('admin', 'PUT', `/admin/implantations/${plan.id}`, { ...full, extraPct: 5 });
+  const lines = [
+    { productId: 21, unit: 'carton', qty: 1, implantationId: plan.id }, // dans le modèle
+    { productId: 9, unit: 'piece', qty: 1, implantationId: plan.id },   // ajouté par le délégué
+    { productId: 21, unit: 'carton', qty: 1 },                          // hors implantation
+  ];
+  const quote = (await call('lea', 'POST', '/quote', { clientId: 3, lines })).data;
+  assert.deepEqual(quote.lines.map((l) => l.extraPct), [5, 0, 0]);
+  assert.equal(quote.lines[0].netCents, Math.round(quote.lines[2].netCents * 0.95));
+  assert.equal(quote.lines[0].implantationName, 'Électroportatif — 2 m');
+  const made = await call('lea', 'POST', '/orders', { clientId: 3, lines: [...lines, { productId: 20, unit: 'carton', qty: 2 }] });
+  assert.equal(made.status, 201);
+  const saved = (await call('lea', 'GET', `/orders/${made.data.order.id}`)).data.lines;
+  assert.deepEqual(saved.map((l) => l.implantationId), [plan.id, plan.id, null, null]);
+  assert.equal(made.data.order.province, 'Namur');
+});
+
+test('crédit : commande refusée au-delà de la limite ou si le client est en attente', async () => {
+  const before = (await call('lea', 'GET', '/clients/3')).data.credit;
+  assert.ok(before.outstandingCents > 0);
+  const big = [{ productId: 20, unit: 'carton', qty: 3 }];
+  await call('admin', 'PUT', '/clients/3', { name: 'Outillage Exemple & Fils', creditLimitCents: before.outstandingCents + 10000 });
+  const q1 = (await call('lea', 'POST', '/quote', { clientId: 3, lines: big })).data;
+  assert.equal(q1.credit.blocked, true);
+  assert.equal(q1.canOrder, false);
+  const refused = await call('lea', 'POST', '/orders', { clientId: 3, lines: big });
+  assert.equal(refused.status, 400);
+  assert.match(refused.data.error, /Limite de crédit dépassée/);
+  // un délégué ne peut pas lever la limite lui-même
+  await call('lea', 'PUT', '/clients/3', { name: 'Outillage Exemple & Fils', creditLimitCents: null, onHold: false });
+  assert.equal((await call('lea', 'POST', '/quote', { clientId: 3, lines: big })).data.credit.blocked, true);
+  // la commande précédente est payée : la place se libère
+  const open = (await call('admin', 'GET', '/orders?client=3')).data.orders[0];
+  await call('admin', 'PATCH', `/admin/orders/${open.id}`, { paid: true });
+  assert.equal((await call('lea', 'POST', '/quote', { clientId: 3, lines: big })).data.credit.blocked, false);
+  await call('admin', 'PUT', '/clients/3', { name: 'Outillage Exemple & Fils', onHold: true });
+  assert.match((await call('lea', 'POST', '/orders', { clientId: 3, lines: big })).data.error, /en attente/);
+  await call('admin', 'PUT', '/clients/3', { name: 'Outillage Exemple & Fils', onHold: false, creditLimitCents: null });
+});
+
+test('facture, rappel, livraison signée', async () => {
+  const o = (await call('admin', 'GET', '/orders?client=3')).data.orders[0];
+  assert.equal((await call('lea', 'POST', `/admin/orders/${o.id}/invoice`)).status, 403);
+  const inv = (await call('admin', 'POST', `/admin/orders/${o.id}/invoice`)).data.order;
+  assert.match(inv.invoiceNumber, /^FAC-\d{4}-00001$/);
+  assert.ok(inv.dueOn > inv.invoicedOn);
+  assert.equal((await call('admin', 'POST', `/admin/orders/${o.id}/invoice`)).data.order.invoiceNumber, inv.invoiceNumber); // pas de second numéro
+  assert.equal((await call('admin', 'GET', `/admin/orders/${o.id}/invoice.pdf`)).data.subarray(0, 5).toString(), '%PDF-');
+  assert.equal((await call('admin', 'PATCH', `/admin/orders/${o.id}`, { reminder: true })).status, 400); // déjà payée
+  await call('admin', 'PATCH', `/admin/orders/${o.id}`, { paid: false });
+  assert.equal((await call('admin', 'PATCH', `/admin/orders/${o.id}`, { reminder: true })).data.order.reminders, 1);
+
+  // Livreur : ne prend pas de commande, voit la tournée, fait signer.
+  await call('admin', 'POST', '/admin/users', { username: 'luc', name: 'Luc Livreur', password: 'luc-password', role: 'livreur' });
+  assert.equal((await call('luc', 'POST', '/login', { username: 'luc', password: 'luc-password' })).status, 200);
+  assert.equal((await call('luc', 'GET', '/clients')).status, 403);
+  assert.equal((await call('luc', 'POST', '/quote', { clientId: 3, lines: [] })).status, 403);
+  assert.equal((await call('luc', 'GET', '/deliveries')).data.deliveries.some((d) => d.id === o.id), false);
+  await call('admin', 'PATCH', `/admin/orders/${o.id}`, { status: 'expediee' });
+  const round = (await call('luc', 'GET', '/deliveries')).data.deliveries;
+  assert.equal(round.find((d) => d.id === o.id).province, 'Namur');
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  assert.equal((await call('luc', 'POST', `/deliveries/${o.id}/proof`, { receivedBy: 'Dominique', signature: '' })).status, 400);
+  assert.equal((await call('lea', 'POST', `/deliveries/${o.id}/proof`, { receivedBy: 'x', signature: png })).status, 403);
+  assert.equal((await call('luc', 'POST', `/deliveries/${o.id}/proof`, { receivedBy: 'Dominique', signature: png })).status, 201);
+  const done = (await call('admin', 'GET', `/orders/${o.id}`)).data;
+  assert.equal(done.order.status, 'livree');
+  assert.equal(done.hasProof, true);
+  assert.equal((await call('admin', 'GET', `/orders/${o.id}/proof`)).data.proof.receivedBy, 'Dominique');
+  assert.equal((await call('admin', 'GET', `/orders/${o.id}/delivery.pdf`)).data.subarray(0, 5).toString(), '%PDF-');
+});
+
+test('import Excel dans une catégorie choisie', async () => {
+  const cat = (await call('admin', 'POST', '/admin/categories', { name: 'Nouveautés' })).data.id;
+  const csv = 'ref;nom;categorie;prix\nNV-1;Article nouveau 1;Autre chose;10\nNV-2;Article nouveau 2;;12,5\n';
+  const r = (await call('admin', 'POST', '/admin/products/import', { csv, categoryId: cat })).data;
+  assert.equal(r.created, 2);
+  const list = (await call('admin', 'GET', `/admin/products?category=${cat}`)).data.products;
+  assert.deepEqual(list.map((p) => p.ref).sort(), ['NV-1', 'NV-2']);
+  assert.equal((await call('admin', 'GET', '/categories')).data.categories.some((c) => c.name === 'Autre chose'), false);
+});

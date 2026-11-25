@@ -10,6 +10,7 @@ const createPricing = require('./pricing');
 const { orderPdf } = require('./pdf');
 const { parseCsv } = require('./csv');
 const { readRows, sendWorkbook, headerKey } = require('./excel');
+const { deliveryProvince } = require('./provinces');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -91,12 +92,19 @@ function createApp(store) {
 
   const user = auth.requireUser;
   const admin = auth.requireAdmin;
+  const role = (...roles) => (req, res, next) => user(req, res, () => {
+    if (!roles.includes(req.user.role)) return res.status(403).json({ error: 'Accès non autorisé pour ce compte.' });
+    next();
+  });
+  const seller = role('admin', 'delegue');   // prise de commande : pas les livreurs
+  const driver = role('admin', 'livreur');   // livraisons
+  const today = () => new Date().toISOString().slice(0, 10);
 
   // ---------- Clients ----------
   const canSee = (u, c) => u.role === 'admin' || c.delegate_id == null || c.delegate_id === u.id;
   const publicClient = (c, u) => {
     const out = { id: c.id, active: !!c.active, discountPct: c.discount_pct, delegateId: c.delegate_id,
-      francoCents: c.franco_cents, createdAt: c.created_at };
+      francoCents: c.franco_cents, createdAt: c.created_at, creditLimitCents: c.credit_limit_cents, onHold: !!c.on_hold };
     for (const f of CLIENT_FIELDS) out[f] = c[f];
     return out;
   };
@@ -108,7 +116,7 @@ function createApp(store) {
     return c;
   }
 
-  api.get('/clients', user, (req, res) => {
+  api.get('/clients', seller, (req, res) => {
     const where = [];
     const args = [];
     if (req.user.role !== 'admin') {
@@ -125,9 +133,9 @@ function createApp(store) {
     res.json({ clients: rows.map((c) => publicClient(c, req.user)) });
   });
 
-  api.get('/clients/:id', user, (req, res) => {
+  api.get('/clients/:id', seller, (req, res) => {
     const c = loadClient(req, req.params.id);
-    const out = { client: publicClient(c, req.user) };
+    const out = { client: publicClient(c, req.user), credit: pricing.credit(c) };
     if (req.user.role === 'admin') {
       out.discounts = q(
         `SELECT d.kind, d.target_id AS targetId, d.pct,
@@ -154,6 +162,11 @@ function createApp(store) {
       ? (b.delegateId ? Number(b.delegateId) : null)
       : existing ? existing.delegate_id : (isAdmin ? null : req.user.id);
     data.active = isAdmin && b.active !== undefined ? (b.active ? 1 : 0) : existing?.active ?? 1;
+    // Limite de crédit et mise en attente : décision du bureau uniquement.
+    data.credit_limit_cents = isAdmin && b.creditLimitCents !== undefined
+      ? (b.creditLimitCents === null || b.creditLimitCents === '' ? null : cents(b.creditLimitCents))
+      : existing?.credit_limit_cents ?? null;
+    data.on_hold = isAdmin && b.onHold !== undefined ? (b.onHold ? 1 : 0) : existing?.on_hold ?? 0;
     const cols = Object.keys(data);
     return tx(() => {
       let id;
@@ -188,10 +201,10 @@ function createApp(store) {
     });
   }
 
-  api.post('/clients', user, (req, res) => {
+  api.post('/clients', seller, (req, res) => {
     res.status(201).json({ client: publicClient(saveClient(req, null), req.user) });
   });
-  api.put('/clients/:id', user, (req, res) => {
+  api.put('/clients/:id', seller, (req, res) => {
     res.json({ client: publicClient(saveClient(req, loadClient(req, req.params.id)), req.user) });
   });
 
@@ -278,7 +291,7 @@ function createApp(store) {
   api.get('/implantations', user, (req, res) => {
     res.json({
       implantations: q(
-        `SELECT m.id, m.name, m.meters, (SELECT COUNT(*) FROM implantation_items i WHERE i.implantation_id = m.id) AS count
+        `SELECT m.id, m.name, m.meters, m.extra_pct AS extraPct, (SELECT COUNT(*) FROM implantation_items i WHERE i.implantation_id = m.id) AS count
          FROM implantations m WHERE m.active = 1 ORDER BY m.meters, m.name COLLATE NOCASE`
       ).all(),
     });
@@ -286,10 +299,10 @@ function createApp(store) {
 
   // Détail chiffré pour un client : ce qui peut partir au panier, et ce qui ne le peut pas (article sans prix).
   api.get('/implantations/:id', user, (req, res) => {
-    const m = q('SELECT id, name, meters FROM implantations WHERE id = ? AND active = 1').get(Number(req.params.id));
+    const m = q('SELECT id, name, meters, extra_pct AS extraPct FROM implantations WHERE id = ? AND active = 1').get(Number(req.params.id));
     if (!m) throw new HttpError(404, 'Implantation introuvable.');
     const items = implantationItems(m.id);
-    const quote = pricing.quote(optionalClient(req), items);
+    const quote = pricing.quote(optionalClient(req), items.map((i) => ({ ...i, implantationId: m.id })));
     const priced = new Set(quote.lines.map((l) => `${l.productId}:${l.unit}`));
     res.json({
       implantation: m,
@@ -301,7 +314,7 @@ function createApp(store) {
   });
 
   // ---------- Panier / commandes ----------
-  api.post('/quote', user, (req, res) => {
+  api.post('/quote', seller, (req, res) => {
     const client = loadClient(req, req.body?.clientId);
     res.json(pricing.quote(client, req.body?.lines));
   });
@@ -310,10 +323,22 @@ function createApp(store) {
     id: o.id, number: o.number, status: o.status, statusLabel: STATUS_LABELS[o.status] || o.status,
     note: o.note, totalCents: o.total_cents, vatPct: o.vat_pct, createdAt: o.created_at,
     clientId: o.client_id, userName: o.user_name, client: JSON.parse(o.client_snapshot),
+    province: deliveryProvince(JSON.parse(o.client_snapshot)),
+    totalTtcCents: Math.round(o.total_cents * (1 + o.vat_pct / 100)),
+    invoiceNumber: o.invoice_number, invoicedOn: o.invoiced_on, dueOn: o.due_on, paidOn: o.paid_on,
+    late: !!o.invoice_number && !o.paid_on && !!o.due_on && o.due_on < today(),
+    reminders: o.reminders, lastReminderOn: o.last_reminder_on, deliveredAt: o.delivered_at,
+  });
+  const publicLine = (l) => ({
+    productId: l.product_id, ref: l.ref, name: l.name, unit: l.unit, unitLabel: l.unitLabel, unitQty: l.unit_qty, qty: l.qty,
+    baseCents: l.base_cents, discountPct: l.discount_pct, promo: !!l.promo, extraPct: l.extra_pct, netCents: l.net_cents,
+    totalCents: l.total_cents, implantationId: l.implantation_id, implantationName: l.implantation_name,
   });
   function loadOrder(req, id) {
     const o = q('SELECT * FROM orders WHERE id = ?').get(Number(id));
-    if (!o || (req.user.role !== 'admin' && o.user_id !== req.user.id)) {
+    const mine = req.user.role === 'admin' || o?.user_id === req.user.id
+      || (req.user.role === 'livreur' && ['preparation', 'expediee', 'livree'].includes(o?.status));
+    if (!o || !mine) {
       throw new HttpError(404, 'Commande introuvable.');
     }
     return o;
@@ -322,12 +347,13 @@ function createApp(store) {
     q('SELECT * FROM order_lines WHERE order_id = ? ORDER BY id').all(id)
       .map((l) => ({ ...l, unitLabel: UNIT_LABELS[l.unit] || l.unit }));
 
-  api.post('/orders', user, (req, res) => {
+  api.post('/orders', seller, (req, res) => {
     const client = loadClient(req, req.body?.clientId);
     if (!client.active) throw new HttpError(400, 'Ce client est désactivé.');
     const order = tx(() => {
       const quote = pricing.quote(client, req.body?.lines);
       if (!quote.lines.length) throw new HttpError(400, 'Le panier est vide.');
+      if (quote.credit?.blocked) throw new HttpError(400, quote.credit.reason);
       if (!quote.canOrder) {
         throw new HttpError(400, `Franco non atteint : il manque ${(quote.missingCents / 100).toFixed(2)} € HT.`);
       }
@@ -344,9 +370,10 @@ function createApp(store) {
       for (const l of quote.lines) {
         q(
           `INSERT INTO order_lines(order_id, product_id, ref, name, unit, unit_qty, qty, base_cents,
-             discount_pct, promo, net_cents, total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             discount_pct, promo, net_cents, total_cents, implantation_id, implantation_name, extra_pct)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(id, l.productId, l.ref, l.name, l.unit, l.unitQty, l.qty, l.baseCents, l.discountPct,
-          l.promo ? 1 : 0, l.netCents, l.totalCents);
+          l.promo ? 1 : 0, l.netCents, l.totalCents, l.implantationId, l.implantationName, l.extraPct);
       }
       return q('SELECT * FROM orders WHERE id = ?').get(id);
     });
@@ -386,12 +413,45 @@ function createApp(store) {
     const o = loadOrder(req, req.params.id);
     res.json({
       order: publicOrder(o),
-      lines: orderLines(o.id).map((l) => ({
-        ref: l.ref, name: l.name, unit: l.unit, unitLabel: l.unitLabel, unitQty: l.unit_qty, qty: l.qty,
-        baseCents: l.base_cents, discountPct: l.discount_pct, promo: !!l.promo, netCents: l.net_cents,
-        totalCents: l.total_cents,
-      })),
+      lines: orderLines(o.id).map(publicLine),
+      hasProof: !!q('SELECT 1 AS x FROM delivery_proofs WHERE order_id = ?').get(o.id),
     });
+  });
+
+  // ---------- Livraisons : tournée du livreur et preuve de réception ----------
+  api.get('/deliveries', driver, (req, res) => {
+    const rows = q("SELECT * FROM orders WHERE status IN ('preparation', 'expediee') ORDER BY id").all();
+    res.json({ deliveries: rows.map((o) => ({ ...publicOrder(o),
+      lineCount: q('SELECT COUNT(*) AS n FROM order_lines WHERE order_id = ?').get(o.id).n })) });
+  });
+  const image = (v, kind, max) => {
+    const s = String(v || '');
+    if (!s) return '';
+    if (!new RegExp(`^data:image/${kind};base64,[A-Za-z0-9+/=]+$`).test(s) || s.length > max) {
+      throw new HttpError(400, 'Image invalide ou trop lourde.');
+    }
+    return s;
+  };
+  api.post('/deliveries/:id/proof', driver, (req, res) => {
+    const o = loadOrder(req, req.params.id);
+    if (!['preparation', 'expediee'].includes(o.status)) throw new HttpError(400, "Cette commande n'est pas en cours de livraison.");
+    const receivedBy = str(req.body?.receivedBy, 120);
+    const signature = image(req.body?.signature, 'png', 400000);
+    const photo = image(req.body?.photo, 'jpeg', 4000000);
+    if (!receivedBy) throw new HttpError(400, 'Indiquez le nom de la personne qui reçoit la marchandise.');
+    if (!signature) throw new HttpError(400, 'La signature est obligatoire.');
+    tx(() => {
+      q(`INSERT OR REPLACE INTO delivery_proofs(order_id, received_by, signature, photo, user_name) VALUES (?, ?, ?, ?, ?)`)
+        .run(o.id, receivedBy, signature, photo, req.user.name || req.user.username);
+      q("UPDATE orders SET status = 'livree', delivered_at = datetime('now') WHERE id = ?").run(o.id);
+    });
+    res.status(201).json({ ok: true });
+  });
+  api.get('/orders/:id/proof', user, (req, res) => {
+    const o = loadOrder(req, req.params.id);
+    const p = q('SELECT * FROM delivery_proofs WHERE order_id = ?').get(o.id);
+    if (!p) throw new HttpError(404, 'Pas de preuve de livraison pour cette commande.');
+    res.json({ proof: { receivedBy: p.received_by, signature: p.signature, photo: p.photo, userName: p.user_name, createdAt: p.created_at } });
   });
 
   api.get('/orders/:id/pdf', user, (req, res) => {
@@ -399,6 +459,14 @@ function createApp(store) {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `${req.query.dl ? 'attachment' : 'inline'}; filename="${o.number}.pdf"`);
     orderPdf({ ...o, client: JSON.parse(o.client_snapshot) }, orderLines(o.id), store.settings(), res);
+  });
+  // Bon de livraison (sans prix, avec la signature si la livraison est faite).
+  api.get('/orders/:id/delivery.pdf', user, (req, res) => {
+    const o = loadOrder(req, req.params.id);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${req.query.dl ? 'attachment' : 'inline'}; filename="BL-${o.number}.pdf"`);
+    orderPdf({ ...o, client: JSON.parse(o.client_snapshot) }, orderLines(o.id), store.settings(), res, undefined,
+      { kind: 'livraison', proof: q('SELECT * FROM delivery_proofs WHERE order_id = ?').get(o.id) });
   });
 
   api.get('/settings', user, (req, res) => {
@@ -411,10 +479,58 @@ function createApp(store) {
   api.use('/admin', admin, adm);
 
   adm.patch('/orders/:id', (req, res) => {
-    if (!STATUSES.includes(req.body?.status)) throw new HttpError(400, 'Statut invalide.');
-    const r = q('UPDATE orders SET status = ? WHERE id = ?').run(req.body.status, Number(req.params.id));
-    if (!r.changes) throw new HttpError(404, 'Commande introuvable.');
-    res.json({ ok: true });
+    const id = Number(req.params.id);
+    const o = q('SELECT * FROM orders WHERE id = ?').get(id);
+    if (!o) throw new HttpError(404, 'Commande introuvable.');
+    const b = req.body || {};
+    if (b.status !== undefined) {
+      if (!STATUSES.includes(b.status)) throw new HttpError(400, 'Statut invalide.');
+      q('UPDATE orders SET status = ? WHERE id = ?').run(b.status, id);
+    }
+    if (b.paid !== undefined) q('UPDATE orders SET paid_on = ? WHERE id = ?').run(b.paid ? today() : '', id);
+    if (b.reminder) {
+      if (!o.invoice_number || o.paid_on) throw new HttpError(400, 'Un rappel ne concerne qu\'une facture impayée.');
+      q('UPDATE orders SET reminders = reminders + 1, last_reminder_on = ? WHERE id = ?').run(today(), id);
+    }
+    res.json({ order: publicOrder(q('SELECT * FROM orders WHERE id = ?').get(id)) });
+  });
+
+  // Facturation : numéro attribué à la suite, échéance selon le délai de paiement.
+  adm.post('/orders/:id/invoice', (req, res) => {
+    const id = Number(req.params.id);
+    const order = tx(() => {
+      const o = q('SELECT * FROM orders WHERE id = ?').get(id);
+      if (!o) throw new HttpError(404, 'Commande introuvable.');
+      if (o.status === 'annulee') throw new HttpError(400, 'Une commande annulée ne se facture pas.');
+      if (!o.invoice_number) {
+        const s = store.settings();
+        const seq = (Number(s.invoice_seq) || 0) + 1;
+        const due = new Date(Date.now() + (Number(s.payment_days) || 0) * 86400e3).toISOString().slice(0, 10);
+        q("INSERT OR REPLACE INTO settings(key, value) VALUES ('invoice_seq', ?)").run(String(seq));
+        q('UPDATE orders SET invoice_number = ?, invoiced_on = ?, due_on = ? WHERE id = ?').run(
+          `FAC-${new Date().getFullYear()}-${String(seq).padStart(5, '0')}`, today(), due, id);
+      }
+      return q('SELECT * FROM orders WHERE id = ?').get(id);
+    });
+    res.json({ order: publicOrder(order) });
+  });
+  adm.get('/orders/:id/invoice.pdf', (req, res) => {
+    const o = q('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id));
+    if (!o || !o.invoice_number) throw new HttpError(404, 'Facture introuvable.');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${req.query.dl ? 'attachment' : 'inline'}; filename="${o.invoice_number}.pdf"`);
+    orderPdf({ ...o, client: JSON.parse(o.client_snapshot) }, orderLines(o.id), store.settings(), res, undefined, { kind: 'facture' });
+  });
+  // Encours par client : ce qui reste dû, la limite, et les factures en retard.
+  adm.get('/credit', (req, res) => {
+    const clients = q('SELECT * FROM clients ORDER BY name COLLATE NOCASE').all().map((c) => {
+      const cr = pricing.credit(c);
+      const late = q(
+        "SELECT COUNT(*) AS n FROM orders WHERE client_id = ? AND invoice_number != '' AND paid_on = '' AND due_on != '' AND due_on < ? AND status != 'annulee'"
+      ).get(c.id, today()).n;
+      return { id: c.id, name: c.name, number: c.number, limitCents: cr.limitCents, outstandingCents: cr.outstandingCents, onHold: cr.onHold, late };
+    });
+    res.json({ clients: clients.filter((c) => c.outstandingCents > 0 || c.onHold || c.limitCents != null) });
   });
 
   adm.get('/settings', (req, res) => res.json({ settings: store.settings() }));
@@ -424,7 +540,8 @@ function createApp(store) {
     if (b.franco_cents !== undefined) next.franco_cents = String(cents(b.franco_cents));
     if (b.franco_blocking !== undefined) next.franco_blocking = b.franco_blocking ? '1' : '0';
     if (b.vat_pct !== undefined) next.vat_pct = String(pct(b.vat_pct));
-    for (const k of ['company_name', 'company_address', 'company_vat', 'company_phone', 'company_email']) {
+    if (b.payment_days !== undefined) next.payment_days = String(Math.max(0, Math.floor(Number(b.payment_days)) || 0));
+    for (const k of ['company_name', 'company_address', 'company_vat', 'company_phone', 'company_email', 'company_iban']) {
       if (b[k] !== undefined) next[k] = str(b[k]);
     }
     for (const [k, v] of Object.entries(next)) q('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)').run(k, v);
@@ -671,6 +788,9 @@ function createApp(store) {
   // Import Excel ou CSV : une ligne par (article, conditionnement).
   adm.post('/products/import', async (req, res) => {
     const rows = await uploadedRows(req);
+    // Import « dans une catégorie » : tous les articles du fichier y sont rangés, quelle que soit leur colonne catégorie.
+    const forced = req.body?.categoryId ? q('SELECT id FROM categories WHERE id = ?').get(Number(req.body.categoryId)) : null;
+    if (req.body?.categoryId && !forced) throw new HttpError(400, 'Catégorie introuvable.');
     const unitOf = (v) => {
       const n = normalize(v).replace(/s$/, '');
       return { '': 'piece', piece: 'piece', pc: 'piece', pce: 'piece', boite: 'boite', carton: 'carton', palette: 'palette' }[n];
@@ -690,8 +810,8 @@ function createApp(store) {
         let p = q('SELECT * FROM products WHERE ref = ?').get(ref);
         const name = str(col(r, 'nom', 'designation', 'libelle'), 200);
         const catName = str(col(r, 'categorie', 'famille'), 100);
-        let catId = null;
-        if (catName) {
+        let catId = forced ? forced.id : null;
+        if (!forced && catName) {
           catId = q('SELECT id FROM categories WHERE name = ?').get(catName)?.id
             ?? q('INSERT INTO categories(name) VALUES (?)').run(catName).lastInsertRowid;
         }
@@ -744,7 +864,7 @@ function createApp(store) {
   adm.get('/implantations', (req, res) => {
     res.json({
       implantations: q(
-        `SELECT m.id, m.name, m.meters, m.active, (SELECT COUNT(*) FROM implantation_items i WHERE i.implantation_id = m.id) AS count
+        `SELECT m.id, m.name, m.meters, m.active, m.extra_pct AS extraPct, (SELECT COUNT(*) FROM implantation_items i WHERE i.implantation_id = m.id) AS count
          FROM implantations m ORDER BY m.meters, m.name COLLATE NOCASE`
       ).all().map((m) => ({ ...m, active: !!m.active })),
     });
@@ -752,7 +872,7 @@ function createApp(store) {
   adm.get('/implantations/:id', (req, res) => {
     const m = q('SELECT * FROM implantations WHERE id = ?').get(Number(req.params.id));
     if (!m) throw new HttpError(404, 'Implantation introuvable.');
-    res.json({ implantation: { ...m, active: !!m.active,
+    res.json({ implantation: { ...m, extraPct: m.extra_pct, active: !!m.active,
       items: implantationItems(m.id).map((i) => ({ ref: i.ref, name: i.name, unit: i.unit, qty: i.qty })) } });
   });
   function saveImplantation(req, id) {
@@ -774,10 +894,10 @@ function createApp(store) {
     if (unknown.length) throw new HttpError(400, `Référence(s) inconnue(s) : ${unknown.slice(0, 10).join(', ')}`);
     return tx(() => {
       if (id) {
-        const r = q('UPDATE implantations SET name = ?, meters = ?, active = ? WHERE id = ?').run(name, len, b.active === false ? 0 : 1, id);
+        const r = q('UPDATE implantations SET name = ?, meters = ?, active = ?, extra_pct = ? WHERE id = ?').run(name, len, b.active === false ? 0 : 1, pct(b.extraPct), id);
         if (!r.changes) throw new HttpError(404, 'Implantation introuvable.');
       } else {
-        id = q('INSERT INTO implantations(name, meters, active) VALUES (?, ?, ?)').run(name, len, b.active === false ? 0 : 1).lastInsertRowid;
+        id = q('INSERT INTO implantations(name, meters, active, extra_pct) VALUES (?, ?, ?, ?)').run(name, len, b.active === false ? 0 : 1, pct(b.extraPct)).lastInsertRowid;
       }
       q('DELETE FROM implantation_items WHERE implantation_id = ?').run(id);
       for (const it of items) q('INSERT INTO implantation_items(implantation_id, product_id, unit, qty) VALUES (?, ?, ?, ?)').run(id, ...it);
@@ -825,6 +945,7 @@ function createApp(store) {
 
   // Utilisateurs
   adm.get('/users', (req, res) => res.json({ users: q('SELECT * FROM users ORDER BY username').all().map(publicUser) }));
+  const roleOf = (r) => (['admin', 'delegue', 'livreur'].includes(r) ? r : 'delegue');
   const checkPassword = (p) => {
     if (String(p || '').length < 8) throw new HttpError(400, 'Le mot de passe doit contenir au moins 8 caractères.');
     return hashPassword(p);
@@ -835,7 +956,7 @@ function createApp(store) {
     if (!username) throw new HttpError(400, "Nom d'utilisateur obligatoire.");
     if (q('SELECT 1 AS x FROM users WHERE username = ?').get(username)) throw new HttpError(400, "Ce nom d'utilisateur existe déjà.");
     const id = q('INSERT INTO users(username, name, password_hash, role) VALUES (?, ?, ?, ?)').run(
-      username, str(b.name, 100), checkPassword(b.password), b.role === 'admin' ? 'admin' : 'delegue'
+      username, str(b.name, 100), checkPassword(b.password), roleOf(b.role)
     ).lastInsertRowid;
     res.status(201).json({ id });
   });
@@ -844,7 +965,7 @@ function createApp(store) {
     const u = q('SELECT * FROM users WHERE id = ?').get(id);
     if (!u) throw new HttpError(404, 'Utilisateur introuvable.');
     const b = req.body || {};
-    const role = b.role === undefined ? u.role : b.role === 'admin' ? 'admin' : 'delegue';
+    const role = b.role === undefined ? u.role : roleOf(b.role);
     const active = b.active === undefined ? u.active : b.active ? 1 : 0;
     if (id === req.user.id && (role !== 'admin' || !active)) {
       throw new HttpError(400, 'Vous ne pouvez pas retirer vos propres droits administrateur.');

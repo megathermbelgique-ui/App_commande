@@ -157,6 +157,9 @@ const DEFAULT_SETTINGS = {
   company_vat: '',
   company_phone: '',
   company_email: '',
+  company_iban: '',
+  payment_days: '30',
+  invoice_seq: '0',
 };
 
 function normalize(s) {
@@ -176,6 +179,33 @@ function open(file) {
     db.exec("ALTER TABLE products ADD COLUMN code TEXT NOT NULL DEFAULT ''");
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_products_code ON products(code)');
+  // Colonnes ajoutées au fil des versions (sans effet si elles existent déjà).
+  const addColumn = (table, name, def) => {
+    if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === name)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
+    }
+  };
+  addColumn('implantations', 'extra_pct', 'REAL NOT NULL DEFAULT 0');       // remise supplémentaire
+  addColumn('order_lines', 'implantation_id', 'INTEGER');
+  addColumn('order_lines', 'implantation_name', "TEXT NOT NULL DEFAULT ''");
+  addColumn('order_lines', 'extra_pct', 'REAL NOT NULL DEFAULT 0');
+  addColumn('clients', 'credit_limit_cents', 'INTEGER');                    // vide = pas de limite
+  addColumn('clients', 'on_hold', 'INTEGER NOT NULL DEFAULT 0');            // client en attente : plus de commande
+  addColumn('orders', 'invoice_number', "TEXT NOT NULL DEFAULT ''");
+  addColumn('orders', 'invoiced_on', "TEXT NOT NULL DEFAULT ''");
+  addColumn('orders', 'due_on', "TEXT NOT NULL DEFAULT ''");
+  addColumn('orders', 'paid_on', "TEXT NOT NULL DEFAULT ''");
+  addColumn('orders', 'reminders', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('orders', 'last_reminder_on', "TEXT NOT NULL DEFAULT ''");
+  addColumn('orders', 'delivered_at', "TEXT NOT NULL DEFAULT ''");
+  db.exec(`CREATE TABLE IF NOT EXISTS delivery_proofs (
+    order_id INTEGER PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+    received_by TEXT NOT NULL DEFAULT '',
+    signature TEXT NOT NULL DEFAULT '',   -- image PNG (data URL)
+    photo TEXT NOT NULL DEFAULT '',       -- image JPEG (data URL)
+    user_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
 
   const cache = new Map();
   const q = (sql) => {

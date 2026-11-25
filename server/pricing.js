@@ -38,7 +38,8 @@ module.exports = function createPricing(store) {
   }
 
   // pieces = nombre total de pièces de cet article dans le panier (pour les promos)
-  function priceUnit(product, unit, client, pieces) {
+  // extraPct : remise supplémentaire d'implantation, appliquée en plus de la remise retenue.
+  function priceUnit(product, unit, client, pieces, extraPct = 0) {
     const base = clientDiscount(client, product);
     let pct = base;
     let promo = false;
@@ -48,8 +49,51 @@ module.exports = function createPricing(store) {
         promo = true;
       }
     }
-    const netCents = Math.round(unit.price_cents * (1 - pct / 100));
-    return { baseCents: unit.price_cents, discountPct: pct, promo, netCents };
+    const netCents = Math.round(unit.price_cents * (1 - pct / 100) * (1 - extraPct / 100));
+    return { baseCents: unit.price_cents, discountPct: pct, promo, extraPct, netCents };
+  }
+
+  const UNIT_ORDER = "CASE unit WHEN 'piece' THEN 0 WHEN 'boite' THEN 1 WHEN 'carton' THEN 2 ELSE 3 END";
+  const unitsOf = (productId) => q(`SELECT * FROM product_units WHERE product_id = ? ORDER BY qty, ${UNIT_ORDER}`).all(productId);
+  const euros = (cents) => (cents / 100).toFixed(2).replace('.', ',') + ' €';
+  const plural = (label, n) => (n > 1 ? label.toLowerCase() + 's' : label.toLowerCase());
+
+  // Avantage d'un conditionnement par rapport au plus petit : « -5 % » si le pourcentage tombe rond,
+  // sinon l'écart en euros par pièce.
+  function saving(unit, ref) {
+    if (!ref || unit.qty <= ref.qty || !ref.price_cents) return null;
+    const perPiece = unit.price_cents / unit.qty;
+    const refPiece = ref.price_cents / ref.qty;
+    const pct = (1 - perPiece / refPiece) * 100;
+    const diffCents = Math.round(refPiece - perPiece);
+    if (pct < 0.05) return null;
+    const round = Math.round(pct);
+    const whole = Math.abs(pct - round) < 0.05;
+    if (!whole && diffCents < 1) return null;
+    return { pct: Math.round(pct * 100) / 100, perPieceCents: diffCents,
+      label: whole ? `-${round} %` : `-${euros(diffCents)} par pièce` };
+  }
+
+  // Conseil au délégué : la quantité approche (ou atteint) un conditionnement plus avantageux.
+  function packHint(units, unit, qty) {
+    const pieces = qty * unit.qty;
+    const perPiece = unit.price_cents / unit.qty;
+    const next = units.find((u) => u.qty > unit.qty && u.price_cents / u.qty < perPiece - 0.0001);
+    if (!next) return null;
+    const nextLabel = (UNIT_LABELS[next.unit] || next.unit).toLowerCase();
+    const adv = saving(next, unit);
+    const gain = adv ? ` (${adv.label})` : '';
+    if (pieces % next.qty === 0) {
+      const n = pieces / next.qty;
+      return { text: `Même quantité en ${n} ${plural(nextLabel, n)} : prix par ${nextLabel}${gain}.`,
+        action: { unit: next.unit, qty: n, label: `Passer à ${n} ${plural(nextLabel, n)}` } };
+    }
+    if (pieces < next.qty && pieces >= next.qty * 0.7) {
+      const missing = next.qty - pieces;
+      return { text: `Ajoutez ${missing} pièce${missing > 1 ? 's' : ''} pour avoir le prix par ${nextLabel}${gain}.`,
+        action: { unit: next.unit, qty: 1, label: `Passer à 1 ${nextLabel}` } };
+    }
+    return null;
   }
 
   function productDetail(productId, client) {
@@ -58,8 +102,7 @@ module.exports = function createPricing(store) {
        WHERE p.id = ? AND p.active = 1`
     ).get(productId);
     if (!p) return null;
-    const order = "CASE unit WHEN 'piece' THEN 0 WHEN 'boite' THEN 1 WHEN 'carton' THEN 2 ELSE 3 END";
-    const units = q(`SELECT * FROM product_units WHERE product_id = ? ORDER BY ${order}`).all(p.id);
+    const units = unitsOf(p.id);
     let specs = [];
     try {
       specs = JSON.parse(p.specs);
@@ -80,6 +123,7 @@ module.exports = function createPricing(store) {
         label: UNIT_LABELS[u.unit] || u.unit,
         qty: u.qty,
         ean: u.ean,
+        saving: saving(u, units[0]),
         ...priceUnit(p, u, client, u.qty),
       })),
       promos: activePromos(p.id).map(publicPromo),
@@ -106,10 +150,40 @@ module.exports = function createPricing(store) {
     return { francoCents: cents, blocking: s.franco_blocking === '1' };
   }
 
-  // lines: [{productId, unit, qty}]
+  // Encours du client : commandes non annulées et non payées, TVA comprise.
+  function credit(client, newTotalCents = 0) {
+    if (!client) return null;
+    const vat = Number(store.settings().vat_pct) || 0;
+    const row = q(
+      `SELECT COALESCE(SUM(ROUND(total_cents * (1 + vat_pct / 100.0))), 0) AS due FROM orders
+       WHERE client_id = ? AND status != 'annulee' AND paid_on = ''`
+    ).get(client.id);
+    const outstandingCents = Number(row.due) || 0;
+    const orderCents = Math.round(newTotalCents * (1 + vat / 100));
+    const limitCents = client.credit_limit_cents;
+    let reason = '';
+    if (client.on_hold) reason = 'Client en attente : aucune commande ne peut être passée. Contactez le bureau.';
+    else if (limitCents != null && outstandingCents + orderCents > limitCents) {
+      reason = `Limite de crédit dépassée : encours ${euros(outstandingCents)} + cette commande ${euros(orderCents)} TTC, `
+        + `pour une limite de ${euros(limitCents)}.`;
+    }
+    return { limitCents, outstandingCents, orderCents, onHold: !!client.on_hold, blocked: !!reason, reason };
+  }
+
+  // lines: [{productId, unit, qty, implantationId?}]
   function quote(client, lines) {
     const clean = [];
     const pieces = new Map();
+    const plans = new Map();
+    const plan = (id) => {
+      if (!id) return null;
+      if (!plans.has(id)) {
+        const m = q('SELECT * FROM implantations WHERE id = ? AND active = 1').get(id);
+        plans.set(id, m ? { ...m, products: new Set(
+          q('SELECT product_id FROM implantation_items WHERE implantation_id = ?').all(id).map((r) => r.product_id)) } : null);
+      }
+      return plans.get(id);
+    };
     for (const l of Array.isArray(lines) ? lines : []) {
       const qty = Math.floor(Number(l.qty));
       if (!(qty > 0) || qty > 100000) continue;
@@ -120,12 +194,14 @@ module.exports = function createPricing(store) {
         String(l.unit)
       );
       if (!unit) continue;
-      clean.push({ product, unit, qty });
+      clean.push({ product, unit, qty, plan: plan(Number(l.implantationId) || 0) });
       pieces.set(product.id, (pieces.get(product.id) || 0) + qty * unit.qty);
     }
     let totalCents = 0;
-    const out = clean.map(({ product, unit, qty }) => {
-      const pr = priceUnit(product, unit, client, pieces.get(product.id));
+    const out = clean.map(({ product, unit, qty, plan: m }) => {
+      // La remise d'implantation ne vaut que pour les articles prévus par le modèle.
+      const extra = m && m.products.has(product.id) ? m.extra_pct : 0;
+      const pr = priceUnit(product, unit, client, pieces.get(product.id), extra);
       const lineTotal = pr.netCents * qty;
       totalCents += lineTotal;
       return {
@@ -138,19 +214,24 @@ module.exports = function createPricing(store) {
         qty,
         ...pr,
         totalCents: lineTotal,
+        implantationId: m ? m.id : null,
+        implantationName: m ? `${m.name} — ${String(m.meters).replace('.', ',')} m` : '',
+        hint: m ? null : packHint(unitsOf(product.id), unit, qty),
       };
     });
     const { francoCents, blocking } = francoFor(client);
     const missingCents = Math.max(0, francoCents - totalCents);
+    const cr = credit(client, totalCents);
     return {
       lines: out,
       totalCents,
       francoCents,
       missingCents,
       francoBlocking: blocking,
-      canOrder: out.length > 0 && (!blocking || missingCents === 0),
+      credit: cr,
+      canOrder: out.length > 0 && (!blocking || missingCents === 0) && !(cr && cr.blocked),
     };
   }
 
-  return { quote, productDetail, activePromos, publicPromo, clientDiscount };
+  return { quote, productDetail, activePromos, publicPromo, clientDiscount, credit };
 };
