@@ -528,16 +528,50 @@ function cartView() {
 
 // ---------- Catalogue ----------
 let catalogueQuery = '';
+const UNIT_NAMES = { piece: 'pièce', boite: 'boîte', carton: 'carton', palette: 'palette' };
+
+// Compteur − n + relié à une ligne du panier du client en cours.
+function cartStepper(productId, unit, label) {
+  const read = () => getCart().find((l) => l.productId === productId && l.unit === unit)?.qty || 0;
+  const input = h('input', { type: 'number', inputmode: 'numeric', min: 0, value: read(), 'aria-label': `Quantité ${label}`,
+    onchange: () => write(Math.max(0, Math.floor(Number(input.value)) || 0)) });
+  const box = h('div', { class: 'stepper small' },
+    h('button', { type: 'button', 'aria-label': 'Moins', onclick: () => write(read() - 1) }, icon('minus', 18)),
+    input,
+    h('button', { type: 'button', 'aria-label': 'Plus', onclick: () => write(read() + 1) }, icon('plus', 18)));
+  function write(qty) {
+    const cart = getCart();
+    const i = cart.findIndex((l) => l.productId === productId && l.unit === unit);
+    if (qty < 1) { if (i >= 0) cart.splice(i, 1); }
+    else if (i >= 0) cart[i].qty = qty;
+    else cart.push({ productId, unit, qty });
+    setCart(cart);
+    input.value = Math.max(0, qty);
+    box.classList.toggle('on', qty > 0);
+  }
+  box.classList.toggle('on', read() > 0);
+  return box;
+}
+
 function productRow(p) {
+  const priced = p.priceCents != null;
+  let side = null;
+  if (priced && state.client) {
+    // Client en cours : la quantité se règle directement dans la liste et part au panier.
+    side = h('div', { class: 'rowqty' },
+      cartStepper(p.id, p.unit, p.name),
+      p.unitCount > 1
+        ? h('button', { class: 'linkbtn', onclick: () => addProduct(p.id) }, `par ${UNIT_NAMES[p.unit] || p.unit} · autres`)
+        : h('small', {}, `par ${UNIT_NAMES[p.unit] || p.unit}`));
+  } else if (priced) {
+    side = h('button', { class: 'rowadd', 'aria-label': `Ajouter ${p.name} au panier`, onclick: () => addProduct(p.id) }, icon('plus', 22));
+  }
   return h('div', { class: 'row split' },
     h('button', { class: 'rowmain', onclick: () => go(`/produit/${p.id}`) },
       h('div', { class: 'thumb' }, p.imageUrl ? photo(p.imageUrl, { alt: '', loading: 'lazy' }) : icon('box', 26)),
-      h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.code ? ' · ' + p.code : ''}`)),
-      p.priceCents != null ? h('span', { class: 'price' }, eur(p.priceCents)) : null),
-    // Commande directe depuis la liste, pour le client en cours
-    p.priceCents != null
-      ? h('button', { class: 'rowadd', 'aria-label': `Ajouter ${p.name} au panier`, onclick: () => addProduct(p.id) }, icon('plus', 22))
-      : null);
+      h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.code ? ' · ' + p.code : ''}`),
+        priced ? h('small', { class: 'price' }, eur(p.priceCents)) : null)),
+    side);
 }
 async function catalogueView(categoryId) {
   header('Catalogue', { back: categoryId ? '/catalogue' : '/' });
@@ -787,41 +821,108 @@ async function implantationView() {
       h('div', { class: 'rows' }, found.map((x) => h('button', { class: 'row', onclick: () => detail(x) },
         h('div', { class: 'grow' }, h('b', {}, x.name), h('small', {}, `${x.count} référence${x.count > 1 ? 's' : ''}`)), icon('chevron', 18)))));
   };
+  // Détail modifiable : la liste des admins sert de base, le délégué ajuste pour ce client
+  // (quantités, retraits, ajouts) avant d'envoyer le tout au panier. Le modèle d'origine n'est pas modifié.
   async function detail(x) {
+    const key = `impl:${state.client.id}:${x.id}`;
     out.replaceChildren(loading());
-    let d;
+    let base;
     try {
-      d = await api(`/implantations/${x.id}?client=${state.client.id}`);
+      base = await api(`/implantations/${x.id}?client=${state.client.id}`);
     } catch (e) {
       out.replaceChildren();
       return fail(e);
     }
-    const add = h('button', { class: 'btn primary big', disabled: !d.lines.length, onclick: () => {
-      const cart = getCart();
-      for (const l of d.lines) {
-        const item = cart.find((c) => c.productId === l.productId && c.unit === l.unit);
-        if (item) item.qty += l.qty;
-        else cart.push({ productId: l.productId, unit: l.unit, qty: l.qty });
+    const original = base.lines.map((l) => ({ productId: l.productId, unit: l.unit, qty: l.qty }));
+    let draft = store.get(key, null) || original.map((d) => ({ ...d }));
+    const same = () => JSON.stringify(draft) === JSON.stringify(original);
+    const save = () => (same() ? localStorage.removeItem(key) : store.set(key, draft));
+    let seq = 0;
+
+    async function render() {
+      const mine = ++seq;
+      let quote;
+      try {
+        quote = await api('/quote', { method: 'POST', body: { clientId: state.client.id, lines: draft } });
+      } catch (e) {
+        return fail(e);
       }
-      setCart(cart);
-      flyToCart(add);
-      toast(`${d.lines.length} référence${d.lines.length > 1 ? 's' : ''} ajoutée${d.lines.length > 1 ? 's' : ''} au panier`);
-      setTimeout(() => go('/panier'), 900);
-    } }, icon('cart', 22), 'Tout ajouter au panier');
-    out.replaceChildren(
-      h('h2', {}, `${x.name} — ${fmt(x.meters)}`),
-      h('p', { class: 'muted' }, `${d.lines.length} référence${d.lines.length > 1 ? 's' : ''} · prix pour ${state.client.name}`),
-      h('div', { class: 'cartlines' }, d.lines.map((l) => h('div', { class: 'cartline' },
-        h('div', { class: 'grow' }, h('b', {}, l.name),
-          h('small', {}, `Réf. ${l.ref} · ${l.qty} × ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
-          h('small', {}, eur(l.netCents), l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
-        h('b', {}, eur(l.totalCents))))),
-      d.unavailable.length ? h('div', { class: 'card warn' },
-        h('h3', {}, `${d.unavailable.length} référence${d.unavailable.length > 1 ? 's' : ''} sans prix, non ajoutée${d.unavailable.length > 1 ? 's' : ''}`),
-        d.unavailable.map((u) => h('small', {}, `${u.ref} · ${u.name} (${u.qty} × ${u.unitLabel})`))) : null,
-      h('div', { class: 'totals' }, h('div', { class: 'total' }, h('span', {}, "Total de l'implantation (HT)"), h('b', {}, eur(d.totalCents)))),
-      add,
-      h('p', { class: 'muted center' }, 'Les quantités restent modifiables dans le panier.'));
+      if (mine !== seq) return;
+      const change = (l, qty) => {
+        const i = draft.findIndex((d) => d.productId === l.productId && d.unit === l.unit);
+        if (i < 0) return;
+        if (qty < 1) draft.splice(i, 1);
+        else draft[i].qty = qty;
+        save();
+        render();
+      };
+      const n = quote.lines.length;
+      const add = h('button', { class: 'btn primary big', disabled: !n, onclick: () => {
+        const cart = getCart();
+        for (const l of quote.lines) {
+          const item = cart.find((c) => c.productId === l.productId && c.unit === l.unit);
+          if (item) item.qty += l.qty;
+          else cart.push({ productId: l.productId, unit: l.unit, qty: l.qty });
+        }
+        setCart(cart);
+        localStorage.removeItem(key);
+        flyToCart(add);
+        toast(`${n} référence${n > 1 ? 's' : ''} ajoutée${n > 1 ? 's' : ''} au panier`);
+        setTimeout(() => go('/panier'), 900);
+      } }, icon('cart', 22), 'Tout ajouter au panier');
+
+      // Ajout d'un article à l'implantation
+      const results = h('div', { class: 'rows' });
+      const search = debounce(async (query) => {
+        if (!query.trim()) return results.replaceChildren();
+        try {
+          const { products } = await api('/products?q=' + encodeURIComponent(query));
+          const list = products.filter((p) => p.priceCents != null).slice(0, 8);
+          results.replaceChildren(...(list.length ? list.map((p) => h('button', { class: 'row', onclick: () => {
+            const d = draft.find((e) => e.productId === p.id && e.unit === p.unit);
+            if (d) d.qty += 1;
+            else draft.push({ productId: p.id, unit: p.unit, qty: 1 });
+            save();
+            toast(`${p.ref} ajouté à l'implantation`);
+            render();
+          } }, h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref} · ${eur(p.priceCents)} / ${UNIT_NAMES[p.unit] || p.unit}`)), icon('plus', 20)))
+            : [empty('Aucun article avec prix pour cette recherche.')]));
+        } catch (e) {
+          fail(e);
+        }
+      }, 250);
+
+      out.replaceChildren(...[
+        h('h2', {}, `${x.name} — ${fmt(x.meters)}`),
+        h('p', { class: 'muted' }, `${n} référence${n > 1 ? 's' : ''} · prix pour ${state.client.name}`,
+          same() ? '' : ' · liste modifiée pour ce client'),
+        h('div', { class: 'cartlines' }, n ? quote.lines.map((l) => {
+          const input = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.qty, 'aria-label': 'Quantité',
+            onchange: () => change(l, Math.max(1, Math.floor(Number(input.value)) || 1)) });
+          return h('div', { class: 'cartline' },
+            h('div', { class: 'grow' }, h('b', {}, l.name),
+              h('small', {}, `Réf. ${l.ref} · ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
+              h('small', {}, `${eur(l.netCents)} / ${l.unitLabel.toLowerCase()}`,
+                l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
+            h('div', { class: 'cartline-right' },
+              h('b', {}, eur(l.totalCents)),
+              h('div', { class: 'stepper small' },
+                h('button', { 'aria-label': l.qty > 1 ? 'Moins' : `Retirer ${l.name}`, onclick: () => change(l, l.qty - 1) }, icon(l.qty > 1 ? 'minus' : 'trash', 18)),
+                input,
+                h('button', { 'aria-label': 'Plus', onclick: () => change(l, l.qty + 1) }, icon('plus', 18)))));
+        }) : empty('Tous les articles ont été retirés.')),
+        base.unavailable.length ? h('div', { class: 'card warn' },
+          h('h3', {}, `${base.unavailable.length} référence${base.unavailable.length > 1 ? 's' : ''} sans prix, non ajoutée${base.unavailable.length > 1 ? 's' : ''}`),
+          base.unavailable.map((u) => h('small', {}, `${u.ref} · ${u.name} (${u.qty} × ${u.unitLabel})`))) : null,
+        h('div', { class: 'card' }, h('h3', {}, 'Ajouter un article à cette implantation'),
+          searchBar('Référence ou nom…', '', search), results),
+        h('div', { class: 'totals' }, h('div', { class: 'total' }, h('span', {}, "Total de l'implantation (HT)"), h('b', {}, eur(quote.totalCents)))),
+        add,
+        same() ? null : h('button', { class: 'btn ghost', onclick: () => { draft = original.map((d) => ({ ...d })); save(); render(); } },
+          "Rétablir la liste d'origine"),
+      ].filter(Boolean));
+    }
+    render();
   }
   $view.replaceChildren(h('div', { class: 'pad' },
     orderClientBar(implantationView),

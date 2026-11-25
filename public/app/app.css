@@ -263,3 +263,14 @@ tr:last-child td, tr:last-child th { border-bottom: 0; }
 .sizechips .chipbtn { border: 1px solid var(--line); padding: 10px 16px; }
 .card.warn { background: #fff6e5; }
 .card.warn h3 { color: #7a5200; }
+
+/* Quantités dans le catalogue */
+.rowmain .price { display: block; color: var(--ink); margin-top: 2px; }
+.rowqty { flex: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 8px 10px 8px 2px; }
+.rowqty small, .linkbtn { font-size: .75rem; color: var(--muted); }
+.linkbtn { text-decoration: underline; padding: 2px 4px; }
+.stepper.small.on { border-color: var(--accent); }
+.stepper.small.on input { background: #fff3df; }
+.card .search { margin-bottom: 8px; }
+.card .rows { border: 1px solid var(--line); }
+.card .rows:empty { display: none; }

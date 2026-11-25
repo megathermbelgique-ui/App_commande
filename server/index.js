@@ -223,7 +223,10 @@ function createApp(store) {
       `SELECT p.id, p.ref, p.code, p.name, p.image_url AS imageUrl, p.active, p.category_id AS categoryId,
          c.name AS category,
          (SELECT price_cents FROM product_units u WHERE u.product_id = p.id
-            ORDER BY CASE unit WHEN 'piece' THEN 0 ELSE 1 END, qty LIMIT 1) AS priceCents
+            ORDER BY CASE unit WHEN 'piece' THEN 0 ELSE 1 END, qty LIMIT 1) AS priceCents,
+         (SELECT unit FROM product_units u WHERE u.product_id = p.id
+            ORDER BY CASE unit WHEN 'piece' THEN 0 ELSE 1 END, qty LIMIT 1) AS unit,
+         (SELECT COUNT(*) FROM product_units u WHERE u.product_id = p.id) AS unitCount
        FROM products p LEFT JOIN categories c ON c.id = p.category_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY p.name COLLATE NOCASE LIMIT 300`

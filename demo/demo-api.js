@@ -93,7 +93,7 @@ async function api(path, { method = 'GET', body } = {}) {
     const list = demoData.products.filter((p) => (!cat || p.categoryId === cat) && t.every((x) => p.search.includes(x)))
       .sort((a, b) => a.name.localeCompare(b.name, 'fr')).slice(0, 300);
     return { products: list.map((p) => ({ id: p.id, ref: p.ref, code: p.code, name: p.name, imageUrl: p.imageUrl, categoryId: p.categoryId,
-      priceCents: p.units.length ? p.units[0].priceCents : null })) };
+      priceCents: p.units.length ? p.units[0].priceCents : null, unit: p.units[0]?.unit || null, unitCount: p.units.length })) };
   }
   if ((m = route.match(/^\/products\/(\d+)$/))) {
     const p = demoData.byId.get(Number(m[1]));
