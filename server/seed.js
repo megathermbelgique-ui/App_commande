@@ -121,6 +121,7 @@ module.exports = function seedDemo(store) {
         q('INSERT INTO implantation_items(implantation_id, product_id, unit, qty) VALUES (?, ?, ?, ?)').run(id, productIds[n], unit, qty);
       }
     }
+    q("UPDATE implantations SET extra_pct = 5 WHERE name = 'Électroportatif'").run();
     const promo = q(
       'INSERT INTO promos(title, description, product_id, min_qty, discount_pct, ends_on) VALUES (?, ?, ?, ?, ?, ?)'
     );

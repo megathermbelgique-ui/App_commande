@@ -23,13 +23,14 @@ const products = q('SELECT * FROM products WHERE active = 1 ORDER BY id').all().
   units: q('SELECT unit, qty, price_cents AS priceCents, ean FROM product_units WHERE product_id = ? ORDER BY qty').all(p.id),
 }));
 const clients = q('SELECT * FROM clients ORDER BY id').all().map((c) => {
-  const { search, created_at, discount_pct, franco_cents, delegate_id, active, ...rest } = c;
-  return { ...rest, active: true, discountPct: discount_pct, francoCents: null, delegateId: null };
+  const { search, created_at, discount_pct, franco_cents, delegate_id, active, credit_limit_cents, on_hold, ...rest } = c;
+  // Un client avec une limite de crédit basse, pour montrer le blocage.
+  return { ...rest, active: true, discountPct: discount_pct, francoCents: null, delegateId: null, creditLimitCents: c.id === 4 ? 250000 : null, onHold: false };
 });
 const promos = q('SELECT * FROM promos').all().map((p) => ({ id: p.id, title: p.title, description: p.description,
   productId: p.product_id, minQty: p.min_qty, discountPct: p.discount_pct, startsOn: p.starts_on, endsOn: p.ends_on, active: true }));
 const implantations = q('SELECT * FROM implantations WHERE active = 1 ORDER BY meters, name').all().map((m) => ({
-  id: m.id, name: m.name, meters: m.meters, active: true,
+  id: m.id, name: m.name, meters: m.meters, active: true, extraPct: m.extra_pct,
   items: q('SELECT product_id AS productId, unit, qty FROM implantation_items WHERE implantation_id = ? ORDER BY id').all(m.id),
 }));
 const priced = products.filter((p) => p.units.length);
@@ -83,6 +84,7 @@ const ADM = path.join(ROOT, 'demo', 'dist-admin');
 fs.rmSync(ADM, { recursive: true, force: true });
 fs.mkdirSync(ADM, { recursive: true });
 const pricing = require('../server/pricing')(store);
+const { deliveryProvince } = require('../server/provinces');
 const users = [
   { id: 1, username: 'admin', name: 'Administrateur', role: 'admin', active: true },
   { id: 2, username: 'jean', name: 'Jean Dupont', role: 'delegue', active: true },
@@ -94,7 +96,7 @@ const sample = [
   [2, 3, 'preparation', 1, [[21, 'carton', 1], [24, 'carton', 4], [4, 'boite', 5]], ''],
   [3, 2, 'expediee', 3, [[20, 'palette', 1]], 'Prévenir le magasin la veille.'],
   [1, 2, 'livree', 9, [[10, 'carton', 6], [18, 'carton', 2], [27, 'carton', 3]], ''],
-  [4, 3, 'livree', 16, [[22, 'carton', 3], [16, 'boite', 10]], ''],
+  [4, 3, 'livree', 45, [[22, 'carton', 3], [16, 'boite', 10]], ''],
 ];
 const orders = sample.map(([clientId, userId, status, daysAgo, items, note], i) => {
   const c = q('SELECT * FROM clients WHERE id = ?').get(clientId);
@@ -106,13 +108,26 @@ const orders = sample.map(([clientId, userId, status, daysAgo, items, note], i) 
     statusLabel: { recue: 'Reçue', preparation: 'En préparation', expediee: 'Expédiée', livree: 'Livrée' }[status],
     note, totalCents: quote.totalCents, vatPct: 21, createdAt: when.toISOString().slice(0, 19).replace('T', ' '),
     clientId, userName: users.find((u) => u.id === userId).name, client: clients.find((x) => x.id === clientId), lines: quote.lines,
+    province: deliveryProvince(c), invoiceNumber: '', invoicedOn: '', dueOn: '', paidOn: '', reminders: 0, lastReminderOn: '', deliveredAt: '', proof: null,
   };
 });
+// Deux commandes livrées et facturées : une payée, une en retard avec un rappel ; preuve de livraison d'exemple.
+const day = (n) => new Date(Date.now() - n * 86400e3).toISOString().slice(0, 10);
+const signature = read('demo/signature-exemple.txt').trim();
+Object.assign(orders[3], { invoiceNumber: `FAC-${day(8).slice(0, 4)}-00002`, invoicedOn: day(8), dueOn: day(-22), paidOn: day(2), deliveredAt: day(8) + ' 09:40:00',
+  proof: { receivedBy: 'Camille Démo', signature, photo: '', userName: 'Luc Livreur', createdAt: day(8) + ' 09:40:00' } });
+Object.assign(orders[4], { invoiceNumber: `FAC-${day(44).slice(0, 4)}-00001`, invoicedOn: day(44), dueOn: day(14), reminders: 1, lastReminderOn: day(5), deliveredAt: day(44) + ' 14:15:00',
+  proof: { receivedBy: 'Magasinier', signature, photo: '', userName: 'Luc Livreur', createdAt: day(44) + ' 14:15:00' } });
+users.push({ id: 4, username: 'luc', name: 'Luc Livreur', role: 'livreur', active: true });
+// La démonstration mobile reçoit les commandes à livrer, pour l'écran du livreur.
+const mobile = JSON.parse(fs.readFileSync(path.join(OUT, 'data.json'), 'utf8'));
+mobile.deliveries = orders.filter((o) => ['preparation', 'expediee'].includes(o.status));
+fs.writeFileSync(path.join(OUT, 'data.json'), JSON.stringify(mobile));
 fs.writeFileSync(path.join(ADM, 'data.json'), JSON.stringify({
   categories: q('SELECT id, name, sort FROM categories ORDER BY sort, name').all(),
   products: products.map((p) => ({ ...p, active: true })),
   clients: clients.map((c, i) => ({ ...c, delegateId: i < 2 ? 2 : null, discounts: [] })),
-  promos, users, orders, implantations, settings: store.settings(),
+  promos, users, orders, implantations, settings: { ...store.settings(), invoice_seq: '2' },
 }));
 fs.copyFileSync(path.join(ROOT, 'node_modules/exceljs/dist/exceljs.min.js'), path.join(ADM, 'exceljs.min.js'));
 fs.copyFileSync(path.join(ROOT, 'node_modules/pdfkit/js/pdfkit.standalone.js'), path.join(ADM, 'pdfkit.standalone.js'));
@@ -120,6 +135,7 @@ const pdfSrc = read('server/pdf.js').replace(/^'use strict';$/m, '').replace(/^c
 const admJs = [
   strip(read('public/shared/ui.js')).replace('async function api(', 'async function serverApi('),
   strip(read('public/shared/ean.js')),
+  strip(read('server/provinces.js').replace(/^'use strict';$/m, '').replace(/^module\.exports.*$/m, '')),
   read('demo/demo-admin-api.js'),
   `const orderPdf = (() => { const STATUS_LABELS = D_STATUS;\n${pdfSrc}\nreturn orderPdf; })();`,
   strip(read('public/admin/admin.js')),

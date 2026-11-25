@@ -4,7 +4,7 @@ const dNorm = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').to
 const dErr = (status, message) => Object.assign(new Error(message), { status });
 const D_UNITS = { piece: 'Pièce', boite: 'Boîte', carton: 'Carton', palette: 'Palette' };
 const D_STATUS = { recue: 'Reçue', preparation: 'En préparation', expediee: 'Expédiée', livree: 'Livrée', annulee: 'Annulée' };
-const D_KEY = 'demo-admin:v2';
+const D_KEY = 'demo-admin:v3';
 let dState = null;
 let dUser = null;
 try { dUser = JSON.parse(sessionStorage.getItem(D_KEY + ':user')); } catch {}
@@ -34,6 +34,16 @@ const dPromoOut = (x) => {
   const p = dState.products.find((e) => e.id === x.productId);
   return { ...x, ref: p?.ref || '', productName: p?.name || '' };
 };
+const dToday = () => new Date().toISOString().slice(0, 10);
+const dEuros = (cents) => (cents / 100).toFixed(2).replace('.', ',') + ' €';
+// Champs calculés d'une commande (retard de paiement, total TTC, province).
+const dOrder = (o) => ({ ...o, proof: undefined, statusLabel: D_STATUS[o.status], province: deliveryProvince(o.client),
+  totalTtcCents: Math.round(o.totalCents * (1 + o.vatPct / 100)), late: !!o.invoiceNumber && !o.paidOn && !!o.dueOn && o.dueOn < dToday() });
+function dCredit(c) {
+  const outstandingCents = dState.orders.filter((o) => o.clientId === c.id && o.status !== 'annulee' && !o.paidOn)
+    .reduce((t, o) => t + Math.round(o.totalCents * (1 + o.vatPct / 100)), 0);
+  return { limitCents: c.creditLimitCents ?? null, outstandingCents, onHold: !!c.onHold };
+}
 function dFilterOrders(query) {
   const t = dTokens(query.get('q'));
   const status = query.get('status');
@@ -71,13 +81,42 @@ async function api(path, { method = 'GET', body } = {}) {
   const done = (value) => { dSave(); return value; };
 
   // Commandes
-  if (route === '/orders') return { orders: dFilterOrders(query) };
-  if ((m = route.match(/^\/orders\/(\d+)$/))) { const o = dFind(S.orders, m[1], 'Commande'); return { order: o, lines: o.lines }; }
+  if (route === '/orders') return { orders: dFilterOrders(query).map(dOrder) };
+  if ((m = route.match(/^\/orders\/(\d+)$/))) { const o = dFind(S.orders, m[1], 'Commande'); return { order: dOrder(o), lines: o.lines, hasProof: !!o.proof }; }
+  if ((m = route.match(/^\/orders\/(\d+)\/proof$/))) {
+    const o = dFind(S.orders, m[1], 'Commande');
+    if (!o.proof) throw dErr(404, 'Pas de preuve de livraison pour cette commande.');
+    return { proof: o.proof };
+  }
+  if ((m = route.match(/^\/admin\/orders\/(\d+)\/invoice$/))) {
+    const o = dFind(S.orders, m[1], 'Commande');
+    if (o.status === 'annulee') throw dErr(400, 'Une commande annulée ne se facture pas.');
+    if (!o.invoiceNumber) {
+      const seq = (Number(S.settings.invoice_seq) || 0) + 1;
+      S.settings.invoice_seq = String(seq);
+      Object.assign(o, { invoiceNumber: `FAC-${new Date().getFullYear()}-${String(seq).padStart(5, '0')}`, invoicedOn: dToday(),
+        dueOn: new Date(Date.now() + (Number(S.settings.payment_days) || 0) * 86400e3).toISOString().slice(0, 10) });
+    }
+    return done({ order: dOrder(o) });
+  }
+  if (route === '/admin/credit') {
+    return { clients: [...S.clients].sort((a, b) => a.name.localeCompare(b.name, 'fr')).map((c) => ({ id: c.id, name: c.name, number: c.number, ...dCredit(c),
+      late: S.orders.filter((o) => o.clientId === c.id && dOrder(o).late).length }))
+      .filter((c) => c.outstandingCents > 0 || c.onHold || c.limitCents != null) };
+  }
   if ((m = route.match(/^\/admin\/orders\/(\d+)$/)) && method === 'PATCH') {
     const o = dFind(S.orders, m[1], 'Commande');
-    if (!D_STATUS[body.status]) throw dErr(400, 'Statut invalide.');
-    o.status = body.status; o.statusLabel = D_STATUS[o.status];
-    return done({ ok: true });
+    if (body.status !== undefined) {
+      if (!D_STATUS[body.status]) throw dErr(400, 'Statut invalide.');
+      o.status = body.status;
+    }
+    if (body.paid !== undefined) o.paidOn = body.paid ? dToday() : '';
+    if (body.reminder) {
+      if (!o.invoiceNumber || o.paidOn) throw dErr(400, "Un rappel ne concerne qu'une facture impayée.");
+      o.reminders = (o.reminders || 0) + 1;
+      o.lastReminderOn = dToday();
+    }
+    return done({ order: dOrder(o) });
   }
 
   // Catégories
@@ -135,7 +174,7 @@ async function api(path, { method = 'GET', body } = {}) {
   if (route === '/clients' && method === 'POST' || (m = route.match(/^\/clients\/(\d+)$/))) {
     const c = m ? dFind(S.clients, m[1], 'Client') : { id: dNext(S.clients), discounts: [] };
     const label = (d) => (d.kind === 'category' ? dCat(d.targetId) : (() => { const p = S.products.find((x) => x.id === d.targetId); return p ? `${p.ref} — ${p.name}` : ''; })());
-    if (method === 'GET') return { client: c, discounts: (c.discounts || []).map((d) => ({ ...d, label: label(d) })) };
+    if (method === 'GET') return { client: c, credit: dCredit(c), discounts: (c.discounts || []).map((d) => ({ ...d, label: label(d) })) };
     if (!String(body.name || '').trim()) throw dErr(400, 'Le nom du client est obligatoire.');
     const discounts = [];
     for (const d of body.discounts || []) {
@@ -149,7 +188,8 @@ async function api(path, { method = 'GET', body } = {}) {
     }
     const blank = Object.fromEntries(Object.keys(S.clients[0]).filter((k) => typeof S.clients[0][k] === 'string').map((k) => [k, '']));
     Object.assign(c, m ? {} : blank, body, { id: c.id, discounts, discountPct: Number(body.discountPct) || 0,
-      francoCents: body.francoCents ?? null, delegateId: body.delegateId ? Number(body.delegateId) : null, active: body.active !== false });
+      francoCents: body.francoCents ?? null, delegateId: body.delegateId ? Number(body.delegateId) : null, active: body.active !== false,
+      creditLimitCents: body.creditLimitCents ?? null, onHold: !!body.onHold });
     c.number ||= 'C' + String(c.id).padStart(5, '0');
     if (!m) S.clients.push(c);
     return done({ client: c });
@@ -158,13 +198,13 @@ async function api(path, { method = 'GET', body } = {}) {
   // Implantations
   if (route === '/admin/implantations' && method === 'GET') {
     return { implantations: [...S.implantations].sort((a, b) => a.meters - b.meters || a.name.localeCompare(b.name, 'fr'))
-      .map((x) => ({ id: x.id, name: x.name, meters: x.meters, active: x.active !== false, count: x.items.length })) };
+      .map((x) => ({ id: x.id, name: x.name, meters: x.meters, extraPct: x.extraPct || 0, active: x.active !== false, count: x.items.length })) };
   }
   if (route === '/admin/implantations' && method === 'POST' || (m = route.match(/^\/admin\/implantations\/(\d+)$/))) {
     if (method === 'DELETE') { S.implantations = S.implantations.filter((x) => x.id !== Number(m[1])); return done({ ok: true }); }
     const x = m ? dFind(S.implantations, m[1], 'Implantation') : { id: dNext(S.implantations), items: [] };
     if (method === 'GET') {
-      return { implantation: { id: x.id, name: x.name, meters: x.meters, active: x.active !== false, items: x.items.map((i) => {
+      return { implantation: { id: x.id, name: x.name, meters: x.meters, extraPct: x.extraPct || 0, active: x.active !== false, items: x.items.map((i) => {
         const p = S.products.find((e) => e.id === i.productId);
         return { ref: p?.ref || '', name: p?.name || '', unit: i.unit, qty: i.qty };
       }) } };
@@ -181,7 +221,7 @@ async function api(path, { method = 'GET', body } = {}) {
       else items.push({ productId: p.id, unit: D_UNITS[it.unit] ? it.unit : 'piece', qty: Math.max(1, Math.floor(Number(it.qty)) || 1) });
     }
     if (unknown.length) throw dErr(400, `Référence(s) inconnue(s) : ${unknown.slice(0, 10).join(', ')}`);
-    Object.assign(x, { name: body.name.trim(), meters: len, active: body.active !== false, items });
+    Object.assign(x, { name: body.name.trim(), meters: len, extraPct: Math.min(100, Math.max(0, Number(body.extraPct) || 0)), active: body.active !== false, items });
     if (!m) S.implantations.push(x);
     return done({ id: x.id });
   }
@@ -208,7 +248,7 @@ async function api(path, { method = 'GET', body } = {}) {
     if (!username) throw dErr(400, "Nom d'utilisateur obligatoire.");
     if (S.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) throw dErr(400, "Ce nom d'utilisateur existe déjà.");
     if (String(body.password || '').length < 8) throw dErr(400, 'Le mot de passe doit contenir au moins 8 caractères.');
-    S.users.push({ id: dNext(S.users), username, name: String(body.name || ''), role: body.role === 'admin' ? 'admin' : 'delegue', active: true });
+    S.users.push({ id: dNext(S.users), username, name: String(body.name || ''), role: ['admin', 'livreur'].includes(body.role) ? body.role : 'delegue', active: true });
     return done({ ok: true });
   }
   if ((m = route.match(/^\/admin\/users\/(\d+)$/))) {
@@ -221,7 +261,7 @@ async function api(path, { method = 'GET', body } = {}) {
     }
     if (body.password && body.password.length < 8) throw dErr(400, 'Le mot de passe doit contenir au moins 8 caractères.');
     if (u.id === 1 && (body.role !== 'admin' || body.active === false)) throw dErr(400, 'Vous ne pouvez pas retirer vos propres droits administrateur.');
-    Object.assign(u, { name: String(body.name ?? u.name), role: body.role === 'admin' ? 'admin' : 'delegue', active: body.active !== false });
+    Object.assign(u, { name: String(body.name ?? u.name), role: ['admin', 'livreur'].includes(body.role) ? body.role : 'delegue', active: body.active !== false });
     return done({ ok: true });
   }
 
@@ -237,7 +277,7 @@ async function api(path, { method = 'GET', body } = {}) {
   // Imports Excel / CSV
   if (route === '/admin/products/import' || route === '/admin/clients/import') {
     const rows = await dRows(body);
-    return done(route.includes('products') ? dImportProducts(rows) : dImportClients(rows));
+    return done(route.includes('products') ? dImportProducts(rows, Number(body.categoryId) || null) : dImportClients(rows));
   }
   throw dErr(404, 'Introuvable.');
 }
@@ -285,7 +325,7 @@ async function dRows(body) {
   return table.map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] || ''])));
 }
 const dNum = (v) => Number(String(v).replace(/[^0-9,.-]/g, '').replace(',', '.'));
-function dImportProducts(rows) {
+function dImportProducts(rows, forcedCategory) {
   let created = 0, updated = 0, noPrice = 0;
   const errors = [];
   const touched = new Set();
@@ -305,7 +345,8 @@ function dImportProducts(rows) {
       updated++;
     }
     touched.add(p.id);
-    if (r.categorie) {
+    if (forcedCategory) p.categoryId = forcedCategory;
+    else if (r.categorie) {
       let c = dState.categories.find((x) => x.name.toLowerCase() === r.categorie.toLowerCase());
       if (!c) dState.categories.push((c = { id: dNext(dState.categories), name: r.categorie, sort: 0 }));
       p.categoryId = c.id;
@@ -365,15 +406,20 @@ async function dExport(url) {
   const query = new URLSearchParams(qs || '');
   const S = await dReady();
   let m;
-  if ((m = route.match(/^\/orders\/(\d+)\/pdf$/))) {
+  if ((m = route.match(/^\/(?:admin\/)?orders\/(\d+)\/(pdf|invoice\.pdf|delivery\.pdf)$/))) {
     const o = dFind(S.orders, m[1], 'Commande');
+    const kind = { pdf: 'commande', 'invoice.pdf': 'facture', 'delivery.pdf': 'livraison' }[m[2]];
     const PDFDocument = await dScript('pdfkit.standalone.js', 'PDFDocument');
     const lines = o.lines.map((l) => ({ ref: l.ref, name: l.name, qty: l.qty, unit_qty: l.unitQty, unitLabel: l.unitLabel,
-      net_cents: l.netCents, discount_pct: l.discountPct, promo: l.promo, total_cents: l.totalCents }));
+      net_cents: l.netCents, discount_pct: l.discountPct, promo: l.promo, total_cents: l.totalCents,
+      implantation_id: l.implantationId, implantation_name: l.implantationName, extra_pct: l.extraPct }));
+    const proof = o.proof ? { received_by: o.proof.receivedBy, signature: o.proof.signature, created_at: o.proof.createdAt, user_name: o.proof.userName } : null;
     const doc = orderPdf({ number: o.number, created_at: o.createdAt, user_name: o.userName, status: o.status, note: o.note,
-      total_cents: o.totalCents, vat_pct: o.vatPct, client: o.client }, lines, S.settings, null, PDFDocument);
+      total_cents: o.totalCents, vat_pct: o.vatPct, client: o.client, invoice_number: o.invoiceNumber, invoiced_on: o.invoicedOn,
+      due_on: o.dueOn, paid_on: o.paidOn }, lines, S.settings, null, PDFDocument, { kind, proof });
     const chunks = [];
-    return { filename: `${o.number}.pdf`, data: await new Promise((resolve) => {
+    const name = kind === 'facture' ? o.invoiceNumber : kind === 'livraison' ? `BL-${o.number}` : o.number;
+    return { filename: `${name}.pdf`, data: await new Promise((resolve) => {
       doc.on('data', (c) => chunks.push(c));
       doc.on('end', () => resolve(new Blob(chunks, { type: 'application/pdf' })));
     }) };

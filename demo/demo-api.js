@@ -21,23 +21,64 @@ async function demoReady() {
       ...p.specs.flat(), ...p.units.map((u) => u.ean)].join(' '));
   }
   demoMem.clients = demoLoad('clients', null) || d.clients;
+  d.deliveries = d.deliveries || [];
   window.__DEMO__.scans = d.scans;
   return (demoData = d);
 }
 
 const demoPromos = (id) => demoData.promos.filter((p) => p.productId === id);
-function demoPrice(p, u, client, pieces) {
+function demoPrice(p, u, client, pieces, extraPct = 0) {
   let pct = client ? client.discountPct || 0 : 0;
   let promo = false;
   for (const x of demoPromos(p.id)) if (pieces >= x.minQty && x.discountPct > pct) { pct = x.discountPct; promo = true; }
-  return { baseCents: u.priceCents, discountPct: pct, promo, netCents: Math.round(u.priceCents * (1 - pct / 100)) };
+  return { baseCents: u.priceCents, discountPct: pct, promo, extraPct, netCents: Math.round(u.priceCents * (1 - pct / 100) * (1 - extraPct / 100)) };
+}
+const demoEuros = (cents) => (cents / 100).toFixed(2).replace('.', ',') + ' €';
+// Mêmes règles que le serveur : avantage d'un conditionnement, conseil au délégué, crédit.
+function demoSaving(u, ref) {
+  if (!ref || u.qty <= ref.qty || !ref.priceCents) return null;
+  const pct = (1 - u.priceCents / u.qty / (ref.priceCents / ref.qty)) * 100;
+  const diff = Math.round(ref.priceCents / ref.qty - u.priceCents / u.qty);
+  if (pct < 0.05) return null;
+  const whole = Math.abs(pct - Math.round(pct)) < 0.05;
+  if (!whole && diff < 1) return null;
+  return { pct, perPieceCents: diff, label: whole ? `-${Math.round(pct)} %` : `-${demoEuros(diff)} par pièce` };
+}
+function demoHint(units, u, qty) {
+  const pieces = qty * u.qty;
+  const next = units.find((x) => x.qty > u.qty && x.priceCents / x.qty < u.priceCents / u.qty - 0.0001);
+  if (!next) return null;
+  const label = DEMO_UNITS[next.unit].toLowerCase();
+  const adv = demoSaving(next, u);
+  const gain = adv ? ` (${adv.label})` : '';
+  if (pieces % next.qty === 0) {
+    const n = pieces / next.qty;
+    return { text: `Même quantité en ${n} ${label}${n > 1 ? 's' : ''} : prix par ${label}${gain}.`, action: { unit: next.unit, qty: n, label: `Passer à ${n} ${label}${n > 1 ? 's' : ''}` } };
+  }
+  if (pieces < next.qty && pieces >= next.qty * 0.7) {
+    const missing = next.qty - pieces;
+    return { text: `Ajoutez ${missing} pièce${missing > 1 ? 's' : ''} pour avoir le prix par ${label}${gain}.`, action: { unit: next.unit, qty: 1, label: `Passer à 1 ${label}` } };
+  }
+  return null;
+}
+function demoCredit(client, newTotalCents = 0) {
+  if (!client) return null;
+  const outstandingCents = demoMem.orders.filter((o) => o.clientId === client.id).reduce((t, o) => t + Math.round(o.totalCents * 1.21), 0);
+  const orderCents = Math.round(newTotalCents * 1.21);
+  const limitCents = client.creditLimitCents ?? null;
+  let reason = '';
+  if (client.onHold) reason = 'Client en attente : aucune commande ne peut être passée. Contactez le bureau.';
+  else if (limitCents != null && outstandingCents + orderCents > limitCents) {
+    reason = `Limite de crédit dépassée : encours ${demoEuros(outstandingCents)} + cette commande ${demoEuros(orderCents)} TTC, pour une limite de ${demoEuros(limitCents)}.`;
+  }
+  return { limitCents, outstandingCents, orderCents, onHold: !!client.onHold, blocked: !!reason, reason };
 }
 function demoDetail(p, client) {
   return {
     id: p.id, ref: p.ref, code: p.code, name: p.name, categoryId: p.categoryId,
     category: demoData.categories.find((c) => c.id === p.categoryId)?.name || '', description: p.description,
     specs: p.specs, imageUrl: p.imageUrl, clientDiscountPct: client ? client.discountPct || 0 : 0,
-    units: p.units.map((u) => ({ unit: u.unit, label: DEMO_UNITS[u.unit], qty: u.qty, ean: u.ean, ...demoPrice(p, u, client, u.qty) })),
+    units: p.units.map((u) => ({ unit: u.unit, label: DEMO_UNITS[u.unit], qty: u.qty, ean: u.ean, saving: demoSaving(u, p.units[0]), ...demoPrice(p, u, client, u.qty) })),
     promos: demoPromos(p.id),
   };
 }
@@ -49,17 +90,22 @@ function demoQuote(client, lines) {
     const u = p?.units.find((x) => x.unit === l.unit);
     const qty = Math.floor(Number(l.qty));
     if (!u || !(qty > 0)) continue;
-    clean.push({ p, u, qty });
+    clean.push({ p, u, qty, plan: demoData.implantations.find((x) => x.id === Number(l.implantationId)) || null });
     pieces.set(p.id, (pieces.get(p.id) || 0) + qty * u.qty);
   }
   let totalCents = 0;
-  const out = clean.map(({ p, u, qty }) => {
-    const pr = demoPrice(p, u, client, pieces.get(p.id));
+  const out = clean.map(({ p, u, qty, plan }) => {
+    const extra = plan && plan.items.some((i) => i.productId === p.id) ? plan.extraPct || 0 : 0;
+    const pr = demoPrice(p, u, client, pieces.get(p.id), extra);
     totalCents += pr.netCents * qty;
-    return { productId: p.id, ref: p.ref, name: p.name, unit: u.unit, unitLabel: DEMO_UNITS[u.unit], unitQty: u.qty, qty, ...pr, totalCents: pr.netCents * qty };
+    return { productId: p.id, ref: p.ref, name: p.name, unit: u.unit, unitLabel: DEMO_UNITS[u.unit], unitQty: u.qty, qty, ...pr, totalCents: pr.netCents * qty,
+      implantationId: plan ? plan.id : null, implantationName: plan ? `${plan.name} — ${String(plan.meters).replace('.', ',')} m` : '',
+      hint: plan ? null : demoHint(p.units, u, qty) };
   });
   const missingCents = Math.max(0, DEMO_FRANCO - totalCents);
-  return { lines: out, totalCents, francoCents: DEMO_FRANCO, missingCents, francoBlocking: true, canOrder: out.length > 0 && missingCents === 0 };
+  const credit = demoCredit(client, totalCents);
+  return { lines: out, totalCents, francoCents: DEMO_FRANCO, missingCents, francoBlocking: true, credit,
+    canOrder: out.length > 0 && missingCents === 0 && !(credit && credit.blocked) };
 }
 const demoTokens = (q) => demoNorm(q).split(/\s+/).filter(Boolean);
 const demoClient = (id) => {
@@ -78,7 +124,8 @@ async function api(path, { method = 'GET', body } = {}) {
   if (route === '/login') {
     const name = String(body.username || '').trim();
     if (!name || !body.password) throw demoErr(401, "Entrez un nom d'utilisateur et un mot de passe.");
-    demoMem.user = { id: 1, username: name, name, role: 'delegue', active: true };
+    // Démo : le nom « livreur » ouvre l'écran des tournées, tout autre nom celui du délégué.
+    demoMem.user = { id: 1, username: name, name, role: demoNorm(name) === 'livreur' ? 'livreur' : 'delegue', active: true };
     demoSave('user', demoMem.user);
     return { user: demoMem.user };
   }
@@ -112,14 +159,14 @@ async function api(path, { method = 'GET', body } = {}) {
     return { promos: demoData.promos.map((x) => ({ ...x, ref: demoData.byId.get(x.productId).ref, productName: demoData.byId.get(x.productId).name })) };
   }
   if (route === '/implantations') {
-    return { implantations: demoData.implantations.map((x) => ({ id: x.id, name: x.name, meters: x.meters, count: x.items.length })) };
+    return { implantations: demoData.implantations.map((x) => ({ id: x.id, name: x.name, meters: x.meters, extraPct: x.extraPct || 0, count: x.items.length })) };
   }
   if ((m = route.match(/^\/implantations\/(\d+)$/))) {
     const x = demoData.implantations.find((e) => e.id === Number(m[1]));
     if (!x) throw demoErr(404, 'Implantation introuvable.');
-    const quote = demoQuote(client, x.items);
+    const quote = demoQuote(client, x.items.map((i) => ({ ...i, implantationId: x.id })));
     const priced = new Set(quote.lines.map((l) => `${l.productId}:${l.unit}`));
-    return { implantation: { id: x.id, name: x.name, meters: x.meters }, lines: quote.lines, totalCents: quote.totalCents,
+    return { implantation: { id: x.id, name: x.name, meters: x.meters, extraPct: x.extraPct || 0 }, lines: quote.lines, totalCents: quote.totalCents,
       unavailable: x.items.filter((i) => !priced.has(`${i.productId}:${i.unit}`)).map((i) => {
         const p = demoData.byId.get(i.productId);
         return { ref: p?.ref || '', name: p?.name || '', qty: i.qty, unitLabel: DEMO_UNITS[i.unit] };
@@ -134,7 +181,7 @@ async function api(path, { method = 'GET', body } = {}) {
     if (!String(body.name || '').trim()) throw demoErr(400, 'Le nom du client est obligatoire.');
     const id = Math.max(0, ...demoMem.clients.map((c) => c.id)) + 1;
     const blank = Object.fromEntries(Object.keys(demoData.clients[0]).map((k) => [k, '']));
-    const c = { ...blank, ...body, id, active: true, discountPct: 0, francoCents: null, delegateId: 1 };
+    const c = { ...blank, ...body, id, active: true, discountPct: 0, francoCents: null, delegateId: 1, creditLimitCents: null, onHold: false };
     c.number ||= 'C' + String(id).padStart(5, '0');
     demoMem.clients.push(c);
     demoSave('clients', demoMem.clients);
@@ -147,27 +194,39 @@ async function api(path, { method = 'GET', body } = {}) {
       Object.assign(c, body, { id: c.id, discountPct: c.discountPct });
       demoSave('clients', demoMem.clients);
     }
-    return { client: c };
+    return { client: c, credit: demoCredit(c) };
   }
   if (route === '/quote') return demoQuote(demoClient(body.clientId), body.lines);
   if (route === '/orders' && method === 'POST') {
     const c = demoClient(body.clientId);
     const quote = demoQuote(c, body.lines);
     if (!quote.lines.length) throw demoErr(400, 'Le panier est vide.');
+    if (quote.credit?.blocked) throw demoErr(400, quote.credit.reason);
     if (!quote.canOrder) throw demoErr(400, 'Franco non atteint.');
     const id = demoMem.orders.length + 1;
     const order = { id, number: `CMD-${new Date().getFullYear()}-${String(id).padStart(5, '0')}`, status: 'recue', statusLabel: DEMO_STATUS.recue,
       note: String(body.note || ''), totalCents: quote.totalCents, vatPct: 21,
-      createdAt: new Date().toISOString().slice(0, 19).replace('T', ' '), clientId: c.id, userName: demoMem.user?.name || '', client: { ...c }, lines: quote.lines };
+      province: '', createdAt: new Date().toISOString().slice(0, 19).replace('T', ' '), clientId: c.id, userName: demoMem.user?.name || '', client: { ...c }, lines: quote.lines };
     demoMem.orders.unshift(order);
     demoSave('orders', demoMem.orders);
     return { order };
   }
   if (route === '/orders') return { orders: demoMem.orders };
   if ((m = route.match(/^\/orders\/(\d+)$/))) {
-    const o = demoMem.orders.find((x) => x.id === Number(m[1]));
+    const o = (demoMem.user?.role === 'livreur' ? demoData.deliveries : demoMem.orders).find((x) => x.id === Number(m[1]));
     if (!o) throw demoErr(404, 'Commande introuvable.');
     return { order: o, lines: o.lines };
+  }
+  // Tournée du livreur : commandes d'exemple, la signature est gardée sur l'appareil.
+  if (route === '/deliveries') {
+    const done = demoLoad('delivered', []);
+    return { deliveries: demoData.deliveries.filter((o) => !done.includes(o.id)).map((o) => ({ ...o, lineCount: o.lines.length })) };
+  }
+  if ((m = route.match(/^\/deliveries\/(\d+)\/proof$/))) {
+    if (!String(body.receivedBy || '').trim()) throw demoErr(400, 'Indiquez le nom de la personne qui reçoit la marchandise.');
+    if (!body.signature) throw demoErr(400, 'La signature est obligatoire.');
+    demoSave('delivered', [...demoLoad('delivered', []), Number(m[1])]);
+    return { ok: true };
   }
   throw demoErr(404, 'Introuvable.');
 }

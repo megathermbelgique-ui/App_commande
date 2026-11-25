@@ -92,6 +92,21 @@ laissés de côté. Plusieurs implantations peuvent avoir la même longueur (une
 **Identifiants** — onglet « Identifiants » : créer, désactiver, changer le mot de passe ou supprimer un identifiant.
 Supprimer un délégué conserve ses commandes et ses clients.
 
+## Commandes, livraisons et paiements
+
+- **Commandes par statut** (interface PC) : Reçues, En préparation, Expédiées, Livrées, Annulées. Les commandes à livrer sont
+  regroupées par province, d'après le code postal de livraison, pour préparer les tournées.
+- **Livreur** : un identifiant de rôle « Livreur » ouvre dans l'application la tournée (commandes en préparation ou expédiées,
+  par province). À la réception, il saisit le nom du réceptionnaire, fait signer à l'écran et peut joindre une photo ;
+  la commande passe en « Livrée ». Signature et photo se consultent dans la commande, et le bon de livraison PDF reprend la signature.
+- **Factures** : « Créer la facture » dans une commande attribue un numéro à la suite et une échéance (délai réglable dans
+  Paramètres). L'onglet « Factures et crédit » suit les factures à payer, en retard, payées, et les rappels notés.
+- **Limite de crédit** : réglée dans la fiche du client. L'encours compte les commandes non annulées et non payées, TVA comprise.
+  Une commande est refusée si l'encours plus cette commande dépasse la limite, ou si le client est mis « en attente ».
+
+> Les factures produites ici sont des documents PDF. Elles ne sont pas des factures électroniques structurées (Peppol) :
+> à vérifier avec votre comptable avant de les utiliser comme factures officielles.
+
 ## Règles de prix
 
 Les prix sont calculés par le serveur ; l'application n'envoie que l'article, le conditionnement et
@@ -99,6 +114,10 @@ la quantité. Ils ne se modifient que depuis l'interface PC, par un administrate
 
 - Remise appliquée à un client : remise sur l'article, sinon remise sur sa catégorie, sinon remise générale.
 - Une promo (quantité minimum en pièces) remplace la remise du client si elle est plus avantageuse ; pas de cumul.
+- Implantation : remise supplémentaire propre à chaque implantation, ajoutée à la remise retenue, uniquement sur les
+  articles prévus par le modèle et commandés via l'implantation.
+- Conditionnements : l'avantage d'une boîte, d'un carton ou d'une palette par rapport à la pièce est affiché en pourcentage
+  quand il tombe rond, sinon en euros par pièce. Le délégué est prévenu quand la quantité approche d'un conditionnement plus avantageux.
 - Franco : montant général dans **Paramètres**, ou montant propre à un client. L'envoi d'une commande
   sous le franco peut être bloqué ou autorisé (case à cocher dans **Paramètres**).
 

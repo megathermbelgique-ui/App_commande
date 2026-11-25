@@ -231,7 +231,7 @@ function showLogin() {
       field('Mot de passe', password),
       error, btn,
       h('p', { class: 'hint' }, DEMO
-        ? 'Démonstration : entrez n\'importe quel nom et mot de passe. Les données restent sur cet appareil.'
+        ? 'Démonstration : entrez n\'importe quel nom et mot de passe (le nom « livreur » ouvre l\'écran du livreur). Les données restent sur cet appareil.'
         : 'Vous resterez connecté sur cet appareil.'))
   );
 }
@@ -1196,6 +1196,9 @@ function accountView() {
     h('button', { class: 'btn ghost danger', onclick: async () => {
       if (!(await ask('Se déconnecter ?', 'Se déconnecter'))) return;
       await api('/logout', { method: 'POST' }).catch(() => {});
+      // Retour à l'accueil pour la prochaine connexion
+      if (DEMO) trail.splice(0, trail.length, '/');
+      else history.replaceState(null, '', location.pathname);
       showLogin();
     } }, 'Se déconnecter')));
 }
