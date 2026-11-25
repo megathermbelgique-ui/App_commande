@@ -84,6 +84,11 @@ Un client est reconnu par son numéro, sinon par son numéro de TVA ; une cellul
 à deux feuilles, « Commandes » (une ligne par commande, avec adresses) et « Lignes » (une ligne par article commandé).
 Le bouton « Excel » d'une commande exporte cette commande seule ; le PDF reste disponible.
 
+**Implantations** — onglet « Implantations » : une implantation est l'assortiment type pour un linéaire d'une longueur
+donnée (nom, nombre de mètres, liste « référence ; quantité ; unité », collable depuis Excel). Dans l'application, le délégué
+choisit le client, entre le nombre de mètres et ajoute toute la liste au panier ; les articles sans prix sont signalés et
+laissés de côté. Plusieurs implantations peuvent avoir la même longueur (une par gamme).
+
 **Identifiants** — onglet « Identifiants » : créer, désactiver, changer le mot de passe ou supprimer un identifiant.
 Supprimer un délégué conserve ses commandes et ses clients.
 

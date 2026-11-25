@@ -114,6 +114,7 @@ const TABS = {
   categories: ['Catégories', categoriesTab],
   clients: ['Clients et remises', clientsTab],
   promos: ['Promos', promosTab],
+  implantations: ['Implantations', implantationsTab],
   utilisateurs: ['Identifiants', usersTab],
   parametres: ['Paramètres', settingsTab],
 };
@@ -451,6 +452,64 @@ function promoModal(p) {
       const dlg = e.target.closest('dialog');
       if (!(await ask('Supprimer cette promo ?', 'Supprimer'))) return;
       await api(`/admin/promos/${p.id}`, { method: 'DELETE' }).catch(oops);
+      dlg.close();
+      reload();
+    } }, 'Supprimer')] : [],
+  });
+}
+
+// ---------- Implantations ----------
+const metersText = (m) => String(m).replace('.', ',') + ' m';
+async function implantationsTab() {
+  const { implantations } = await api('/admin/implantations');
+  main.replaceChildren(
+    h('div', { class: 'toolbar' }, h('h2', {}, 'Implantations'),
+      h('button', { class: 'btn primary', onclick: () => implantationModal(null).catch(oops) }, 'Nouvelle implantation')),
+    table(['Nom', { num: 'Longueur' }, { num: 'Références' }, 'État'], implantations.map((m) =>
+      h('tr', { class: 'click' + (m.active ? '' : ' off'), onclick: () => implantationModal(m.id).catch(oops) },
+        h('td', {}, h('b', {}, m.name)), h('td', { class: 'num' }, metersText(m.meters)), h('td', { class: 'num' }, m.count),
+        h('td', {}, m.active ? 'Active' : 'Désactivée'))), 'Aucune implantation.'),
+    h('p', { class: 'muted', style: { marginTop: '12px' } },
+      "Une implantation est l'assortiment type pour un linéaire d'une longueur donnée. Dans l'application, le délégué entre le nombre de mètres ",
+      'et retrouve la liste correspondante, qu\'il ajoute au panier en une fois. Plusieurs implantations peuvent avoir la même longueur (une par gamme).'));
+}
+async function implantationModal(id) {
+  const m = id ? (await api(`/admin/implantations/${id}`)).implantation : { active: true, items: [] };
+  const name = text(m.name, { required: true, placeholder: 'ex. Outillage à main' });
+  const len = text(m.meters != null ? String(m.meters).replace('.', ',') : '', { required: true, inputmode: 'decimal', placeholder: 'ex. 2' });
+  const items = area(m.items.map((i) => [i.ref, i.qty, i.unit].join(' ; ')).join('\n'), 14);
+  const active = check('Implantation active (visible dans l\'application)', m.active);
+  const units = { '': 'piece', piece: 'piece', pieces: 'piece', pc: 'piece', pce: 'piece', boite: 'boite', boites: 'boite', carton: 'carton', cartons: 'carton', palette: 'palette', palettes: 'palette' };
+  const plain = (v) => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  modal(id ? `Implantation ${m.name} — ${metersText(m.meters)}` : 'Nouvelle implantation', [
+    h('div', { class: 'grid2' }, f('Nom *', name), f('Longueur du linéaire (mètres) *', len)),
+    f('Articles — un par ligne : référence ; quantité ; unité', items),
+    h('p', { class: 'muted' }, 'Unité : piece (par défaut), boite, carton ou palette. Vous pouvez coller directement trois colonnes copiées depuis Excel. ',
+      'Le code article à 6 chiffres est accepté à la place de la référence.'),
+    id && m.items.length ? h('details', {}, h('summary', {}, `Voir les ${m.items.length} articles avec leur nom`),
+      table(['Référence', 'Nom', { num: 'Qté' }, 'Unité'], m.items.map((i) => h('tr', {}, h('td', {}, i.ref), h('td', {}, i.name), h('td', { class: 'num' }, i.qty), h('td', {}, i.unit))))) : null,
+    active.el,
+  ], {
+    onSave: async () => {
+      const list = [];
+      items.value.split('\n').forEach((line, i) => {
+        const parts = line.split(/[;\t]/).map((x) => x.trim());
+        if (!parts[0]) return;
+        const unit = units[plain(parts[2] || '')];
+        if (!unit) throw new Error(`Ligne ${i + 1} : unité inconnue « ${parts[2]} ».`);
+        const qty = parts[1] === undefined || parts[1] === '' ? 1 : Number(parts[1].replace(',', '.'));
+        if (!(qty >= 1) || !Number.isInteger(qty)) throw new Error(`Ligne ${i + 1} : quantité invalide « ${parts[1]} ».`);
+        list.push({ ref: parts[0], qty, unit });
+      });
+      if (!list.length) throw new Error('Ajoutez au moins un article.');
+      await api(id ? `/admin/implantations/${id}` : '/admin/implantations', { method: id ? 'PUT' : 'POST',
+        body: { name: name.value, meters: num(len.value), active: active.input.checked, items: list } });
+      reload();
+    },
+    extra: id ? [h('button', { class: 'btn danger', type: 'button', onclick: async (e) => {
+      const dlg = e.target.closest('dialog');
+      if (!(await ask(`Supprimer l'implantation « ${m.name} — ${metersText(m.meters)} » ?`, 'Supprimer'))) return;
+      await api(`/admin/implantations/${id}`, { method: 'DELETE' }).catch(oops);
       dlg.close();
       reload();
     } }, 'Supprimer')] : [],

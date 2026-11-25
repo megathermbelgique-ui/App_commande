@@ -263,6 +263,40 @@ function createApp(store) {
     res.json({ promos: rows.map((r) => ({ ...pricing.publicPromo(r), ref: r.ref, productName: r.name })) });
   });
 
+  // ---------- Implantations : assortiment type pour un linéaire de N mètres ----------
+  const meters = (v) => {
+    const n = Math.round(Number(String(v ?? '').replace(',', '.')) * 100) / 100;
+    return Number.isFinite(n) && n > 0 && n <= 1000 ? n : null;
+  };
+  const implantationItems = (id) =>
+    q(`SELECT i.product_id AS productId, i.unit, i.qty, p.ref, p.name, p.active
+       FROM implantation_items i JOIN products p ON p.id = i.product_id WHERE i.implantation_id = ? ORDER BY i.id`).all(id);
+
+  api.get('/implantations', user, (req, res) => {
+    res.json({
+      implantations: q(
+        `SELECT m.id, m.name, m.meters, (SELECT COUNT(*) FROM implantation_items i WHERE i.implantation_id = m.id) AS count
+         FROM implantations m WHERE m.active = 1 ORDER BY m.meters, m.name COLLATE NOCASE`
+      ).all(),
+    });
+  });
+
+  // Détail chiffré pour un client : ce qui peut partir au panier, et ce qui ne le peut pas (article sans prix).
+  api.get('/implantations/:id', user, (req, res) => {
+    const m = q('SELECT id, name, meters FROM implantations WHERE id = ? AND active = 1').get(Number(req.params.id));
+    if (!m) throw new HttpError(404, 'Implantation introuvable.');
+    const items = implantationItems(m.id);
+    const quote = pricing.quote(optionalClient(req), items);
+    const priced = new Set(quote.lines.map((l) => `${l.productId}:${l.unit}`));
+    res.json({
+      implantation: m,
+      lines: quote.lines,
+      totalCents: quote.totalCents,
+      unavailable: items.filter((i) => !priced.has(`${i.productId}:${i.unit}`))
+        .map((i) => ({ ref: i.ref, name: i.name, qty: i.qty, unitLabel: UNIT_LABELS[i.unit] || i.unit })),
+    });
+  });
+
   // ---------- Panier / commandes ----------
   api.post('/quote', user, (req, res) => {
     const client = loadClient(req, req.body?.clientId);
@@ -701,6 +735,57 @@ function createApp(store) {
       return { created, updated, noPrice, errors };
     });
     res.json(result);
+  });
+
+  // Implantations
+  adm.get('/implantations', (req, res) => {
+    res.json({
+      implantations: q(
+        `SELECT m.id, m.name, m.meters, m.active, (SELECT COUNT(*) FROM implantation_items i WHERE i.implantation_id = m.id) AS count
+         FROM implantations m ORDER BY m.meters, m.name COLLATE NOCASE`
+      ).all().map((m) => ({ ...m, active: !!m.active })),
+    });
+  });
+  adm.get('/implantations/:id', (req, res) => {
+    const m = q('SELECT * FROM implantations WHERE id = ?').get(Number(req.params.id));
+    if (!m) throw new HttpError(404, 'Implantation introuvable.');
+    res.json({ implantation: { ...m, active: !!m.active,
+      items: implantationItems(m.id).map((i) => ({ ref: i.ref, name: i.name, unit: i.unit, qty: i.qty })) } });
+  });
+  function saveImplantation(req, id) {
+    const b = req.body || {};
+    const name = str(b.name, 120);
+    const len = meters(b.meters);
+    if (!name) throw new HttpError(400, 'Nom obligatoire.');
+    if (!len) throw new HttpError(400, 'Longueur en mètres invalide.');
+    const items = [];
+    const unknown = [];
+    for (const it of Array.isArray(b.items) ? b.items : []) {
+      const ref = str(it.ref, 60);
+      if (!ref) continue;
+      const p = q('SELECT id FROM products WHERE ref = ?').get(ref)
+        || q("SELECT id FROM products WHERE code = ? AND code != ''").get(ref);
+      if (!p) { unknown.push(ref); continue; }
+      items.push([p.id, UNITS.includes(it.unit) ? it.unit : 'piece', Math.max(1, Math.floor(Number(it.qty)) || 1)]);
+    }
+    if (unknown.length) throw new HttpError(400, `Référence(s) inconnue(s) : ${unknown.slice(0, 10).join(', ')}`);
+    return tx(() => {
+      if (id) {
+        const r = q('UPDATE implantations SET name = ?, meters = ?, active = ? WHERE id = ?').run(name, len, b.active === false ? 0 : 1, id);
+        if (!r.changes) throw new HttpError(404, 'Implantation introuvable.');
+      } else {
+        id = q('INSERT INTO implantations(name, meters, active) VALUES (?, ?, ?)').run(name, len, b.active === false ? 0 : 1).lastInsertRowid;
+      }
+      q('DELETE FROM implantation_items WHERE implantation_id = ?').run(id);
+      for (const it of items) q('INSERT INTO implantation_items(implantation_id, product_id, unit, qty) VALUES (?, ?, ?, ?)').run(id, ...it);
+      return id;
+    });
+  }
+  adm.post('/implantations', (req, res) => res.status(201).json({ id: saveImplantation(req, null) }));
+  adm.put('/implantations/:id', (req, res) => res.json({ id: saveImplantation(req, Number(req.params.id)) }));
+  adm.delete('/implantations/:id', (req, res) => {
+    q('DELETE FROM implantations WHERE id = ?').run(Number(req.params.id));
+    res.json({ ok: true });
   });
 
   // Promos

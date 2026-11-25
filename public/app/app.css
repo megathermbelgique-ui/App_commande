@@ -246,3 +246,20 @@ tr:last-child td, tr:last-child th { border-bottom: 0; }
 .scan-msg.demo { top: 70px; bottom: auto; text-shadow: none; display: flex; flex-direction: column; gap: 12px; max-height: calc(100% - 80px); overflow-y: auto; }
 .chips { display: flex; flex-direction: column; gap: 8px; }
 .chipbtn { display: flex; align-items: center; gap: 8px; background: #fff; color: var(--ink); border-radius: 12px; padding: 12px 14px; font-weight: 600; text-align: left; }
+
+/* Commande depuis le catalogue, implantation */
+.clientbar u { color: var(--accent); text-decoration: none; font-weight: 600; }
+.clientbar.none { background: var(--accent); color: var(--accent-ink); }
+.row.split { padding: 0; align-items: stretch; gap: 0; }
+.rowmain { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; padding: 12px 6px 12px 14px; }
+.rowadd { flex: none; width: 52px; display: grid; place-items: center; color: var(--accent-ink); background: var(--accent); margin: 10px 10px 10px 4px; border-radius: 12px; }
+.rowadd:active, .rowmain:active { filter: brightness(.94); }
+.tile.wide.low { min-height: 96px; }
+.metersrow { display: flex; align-items: center; gap: 10px; }
+.metersrow input { flex: 1; min-width: 0; font-size: 1.4rem; font-weight: 700; text-align: center; min-height: 56px; }
+.metersrow span { font-size: 1.3rem; font-weight: 700; }
+.metersrow .btn { min-height: 56px; }
+.sizechips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sizechips .chipbtn { border: 1px solid var(--line); padding: 10px 16px; }
+.card.warn { background: #fff6e5; }
+.card.warn h3 { color: #7a5200; }

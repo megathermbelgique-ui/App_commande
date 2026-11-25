@@ -200,3 +200,27 @@ test('identifiants : suppression par un administrateur, commandes conservées', 
   assert.equal(orders.length, 1);
   assert.equal(orders[0].userName, 'Jean');
 });
+
+test('implantations : liste au mètre, détail chiffré pour le client, gestion réservée à l\'administrateur', async () => {
+  const list = (await call('lea', 'GET', '/implantations')).data.implantations;
+  assert.deepEqual(list.map((x) => x.meters), [1, 2, 2, 3]);
+  const one = list.find((x) => x.meters === 1);
+  const d = (await call('lea', 'GET', `/implantations/${one.id}?client=2`)).data;
+  assert.equal(d.lines.length, 5);
+  assert.equal(d.unavailable.length, 0);
+  assert.equal(d.lines[1].discountPct, 15); // remise du client 2
+  assert.equal(d.totalCents, d.lines.reduce((s, l) => s + l.totalCents, 0));
+
+  assert.equal((await call('lea', 'POST', '/admin/implantations', { name: 'x', meters: 1, items: [] })).status, 403);
+  const bad = await call('admin', 'POST', '/admin/implantations', { name: 'Test', meters: '1,5', items: [{ ref: 'INCONNU', qty: 1 }] });
+  assert.equal(bad.status, 400);
+  const made = await call('admin', 'POST', '/admin/implantations', {
+    name: 'Test', meters: '1,5', items: [{ ref: 'DEMO-010', qty: 3, unit: 'boite' }, { ref: 'DEMO-010', qty: 2, unit: 'palette' }],
+  });
+  assert.equal(made.status, 201);
+  const t = (await call('lea', 'GET', `/implantations/${made.data.id}`)).data;
+  assert.equal(t.implantation.meters, 1.5);
+  assert.deepEqual([t.lines.length, t.unavailable.length], [1, 1]); // DEMO-010 n'existe pas en palette
+  assert.equal((await call('admin', 'DELETE', `/admin/implantations/${made.data.id}`)).status, 200);
+  assert.equal((await call('lea', 'GET', `/implantations/${made.data.id}`)).status, 404);
+});

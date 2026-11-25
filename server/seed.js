@@ -105,6 +105,22 @@ module.exports = function seedDemo(store) {
       ).run('C' + String(i + 1).padStart(5, '0'), ...cols.map((k) => c[k])).lastInsertRowid;
       store.refreshClientSearch(id);
     });
+    // Implantations d'exemple : plus le linéaire est long, plus l'assortiment est large.
+    const plans = [
+      ['Outillage à main', 1, [[0, 'boite', 1], [1, 'boite', 1], [4, 'boite', 1], [8, 'boite', 1], [15, 'boite', 1]]],
+      ['Outillage à main', 2, [[0, 'boite', 2], [1, 'boite', 2], [2, 'boite', 1], [4, 'boite', 2], [5, 'boite', 1], [8, 'boite', 2],
+        [11, 'boite', 1], [12, 'boite', 1], [15, 'boite', 2], [18, 'boite', 1]]],
+      ['Outillage à main', 3, [[0, 'carton', 1], [1, 'carton', 1], [2, 'boite', 2], [3, 'boite', 1], [4, 'carton', 1], [5, 'boite', 2],
+        [6, 'boite', 2], [7, 'boite', 1], [8, 'carton', 1], [9, 'boite', 1], [11, 'boite', 2], [12, 'boite', 2], [13, 'boite', 1],
+        [14, 'boite', 1], [15, 'carton', 1], [16, 'boite', 2], [17, 'boite', 1], [18, 'boite', 2]]],
+      ['Électroportatif', 2, [[19, 'carton', 1], [20, 'carton', 1], [21, 'carton', 1], [22, 'carton', 1], [23, 'boite', 2], [24, 'carton', 2]]],
+    ];
+    for (const [name, len, items] of plans) {
+      const id = q('INSERT INTO implantations(name, meters) VALUES (?, ?)').run(name, len).lastInsertRowid;
+      for (const [n, unit, qty] of items) {
+        q('INSERT INTO implantation_items(implantation_id, product_id, unit, qty) VALUES (?, ?, ?, ?)').run(id, productIds[n], unit, qty);
+      }
+    }
     const promo = q(
       'INSERT INTO promos(title, description, product_id, min_qty, discount_pct, ends_on) VALUES (?, ?, ?, ?, ?, ?)'
     );

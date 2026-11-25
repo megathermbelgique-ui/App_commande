@@ -111,6 +111,20 @@ async function api(path, { method = 'GET', body } = {}) {
   if (route === '/promos') {
     return { promos: demoData.promos.map((x) => ({ ...x, ref: demoData.byId.get(x.productId).ref, productName: demoData.byId.get(x.productId).name })) };
   }
+  if (route === '/implantations') {
+    return { implantations: demoData.implantations.map((x) => ({ id: x.id, name: x.name, meters: x.meters, count: x.items.length })) };
+  }
+  if ((m = route.match(/^\/implantations\/(\d+)$/))) {
+    const x = demoData.implantations.find((e) => e.id === Number(m[1]));
+    if (!x) throw demoErr(404, 'Implantation introuvable.');
+    const quote = demoQuote(client, x.items);
+    const priced = new Set(quote.lines.map((l) => `${l.productId}:${l.unit}`));
+    return { implantation: { id: x.id, name: x.name, meters: x.meters }, lines: quote.lines, totalCents: quote.totalCents,
+      unavailable: x.items.filter((i) => !priced.has(`${i.productId}:${i.unit}`)).map((i) => {
+        const p = demoData.byId.get(i.productId);
+        return { ref: p?.ref || '', name: p?.name || '', qty: i.qty, unitLabel: DEMO_UNITS[i.unit] };
+      }) };
+  }
   if (route === '/clients' && method === 'GET') {
     const t = demoTokens(query.get('q'));
     const text = (c) => demoNorm([c.number, c.name, c.vat, c.vat.replace(/[^0-9a-z]/gi, ''), c.hq_city, c.hq_zip, c.manager_name, c.email].join(' '));

@@ -174,6 +174,7 @@ const routes = [
   [/^\/client\/(\d+)$/, clientView],
   [/^\/client\/(\d+)\/modifier$/, clientForm],
   [/^\/promos$/, promosView],
+  [/^\/implantation$/, implantationView],
   [/^\/compte$/, accountView],
 ];
 function route() {
@@ -244,10 +245,11 @@ function home() {
         : null,
       h('div', { class: 'tiles' },
         tile('/scan', 'scan', 'Scan', 'Scanner des codes-barres', 'wide accent'),
-        tile('/catalogue', 'book', 'Catalogue', 'Articles et catégories'),
+        tile('/catalogue', 'book', 'Catalogue', 'Commander par article'),
+        tile('/implantation', 'ruler', 'Implantation', 'Assortiment au mètre'),
         tile('/commandes', 'list', 'Commandes passées', 'Suivi et statuts'),
         tile('/clients', 'people', 'Clients', 'Fiches et nouveaux clients'),
-        tile('/promos', 'tag', 'Promos', 'Offres du moment')))
+        tile('/promos', 'tag', 'Promos', 'Offres du moment', 'wide low')))
   );
 }
 
@@ -345,10 +347,19 @@ function openAddSheet(product, presetUnit, onClose = () => {}) {
 }
 
 // Ouvre la fenêtre d'ajout ; demande d'abord le client si aucun n'est sélectionné.
+// Bandeau « client en cours » des écrans de commande ; permet de le choisir ou d'en changer sur place.
+function orderClientBar(onChange) {
+  const pick = () => $view.replaceChildren(clientPicker((c) => { setClient(c); onChange(); }));
+  return state.client
+    ? h('button', { class: 'clientbar', onclick: pick }, h('span', {}, 'Commande pour'), h('b', {}, state.client.name), h('u', {}, 'Changer'))
+    : h('button', { class: 'clientbar none', onclick: pick }, icon('people', 20), h('b', {}, 'Choisir le client pour commander'), icon('chevron', 18));
+}
+
 async function addProduct(productId) {
   if (!state.client) {
-    toast("Sélectionnez d'abord un client.", 'err');
-    return go('/clients');
+    toast("Choisissez d'abord le client.", 'err');
+    $view.replaceChildren(clientPicker((c) => { setClient(c); route(); }));
+    return;
   }
   try {
     const { product } = await api(`/products/${productId}?client=${state.client.id}`);
@@ -518,16 +529,22 @@ function cartView() {
 // ---------- Catalogue ----------
 let catalogueQuery = '';
 function productRow(p) {
-  return h('button', { class: 'row', onclick: () => go(`/produit/${p.id}`) },
-    h('div', { class: 'thumb' }, p.imageUrl ? photo(p.imageUrl, { alt: '', loading: 'lazy' }) : icon('box', 26)),
-    h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.code ? ' · ' + p.code : ''}`)),
-    p.priceCents != null ? h('span', { class: 'price' }, eur(p.priceCents)) : null);
+  return h('div', { class: 'row split' },
+    h('button', { class: 'rowmain', onclick: () => go(`/produit/${p.id}`) },
+      h('div', { class: 'thumb' }, p.imageUrl ? photo(p.imageUrl, { alt: '', loading: 'lazy' }) : icon('box', 26)),
+      h('div', { class: 'grow' }, h('b', {}, p.name), h('small', {}, `Réf. ${p.ref}${p.code ? ' · ' + p.code : ''}`)),
+      p.priceCents != null ? h('span', { class: 'price' }, eur(p.priceCents)) : null),
+    // Commande directe depuis la liste, pour le client en cours
+    p.priceCents != null
+      ? h('button', { class: 'rowadd', 'aria-label': `Ajouter ${p.name} au panier`, onclick: () => addProduct(p.id) }, icon('plus', 22))
+      : null);
 }
 async function catalogueView(categoryId) {
   header('Catalogue', { back: categoryId ? '/catalogue' : '/' });
   const out = h('div', {}, loading());
   const show = debounce(render, 220);
   $view.replaceChildren(h('div', { class: 'pad' },
+    orderClientBar(() => catalogueView(categoryId)),
     searchBar('Référence, nom, caractéristique…', categoryId ? '' : catalogueQuery, (v) => { if (!categoryId) catalogueQuery = v; show(v); }),
     out));
   let seq = 0;
@@ -537,7 +554,9 @@ async function catalogueView(categoryId) {
       if (!query.trim() && !categoryId) {
         const { categories } = await api('/categories');
         if (mine !== seq) return;
-        out.replaceChildren(h('h2', {}, 'Catégories'),
+        out.replaceChildren(
+          h('button', { class: 'btn', onclick: () => go('/implantation') }, icon('ruler', 20), 'Implantation au mètre'),
+          h('h2', {}, 'Catégories'),
           h('div', { class: 'rows' }, categories.length
             ? categories.map((c) => h('button', { class: 'row', onclick: () => go(`/catalogue/${c.id}`) },
                 h('div', { class: 'grow' }, h('b', {}, c.name), h('small', {}, `${c.count} article${c.count > 1 ? 's' : ''}`)), icon('chevron', 18)))
@@ -734,6 +753,85 @@ async function clientForm(id) {
       input('iban', 'Compte bancaire (IBAN)', { autocapitalize: 'characters' })),
     group('Informations complémentaires', input('notes', 'Remarques', { rows: 3 })),
     error, save));
+}
+
+// ---------- Implantation : assortiment type selon la longueur du linéaire ----------
+async function implantationView() {
+  header('Implantation', { back: '/' });
+  if (!state.client) {
+    $view.replaceChildren(clientPicker((c) => { setClient(c); implantationView(); }, 'Implantation : sélectionnez un client'));
+    return;
+  }
+  $view.replaceChildren(loading());
+  let all;
+  try {
+    ({ implantations: all } = await api('/implantations'));
+  } catch (e) {
+    return fail(e);
+  }
+  const fmt = (m) => String(m).replace('.', ',') + ' m';
+  const sizes = [...new Set(all.map((x) => x.meters))];
+  const input = h('input', { type: 'text', inputmode: 'decimal', placeholder: 'ex. 2', 'aria-label': 'Nombre de mètres', enterkeyhint: 'go' });
+  const out = h('div', { class: 'stack' });
+  const show = () => {
+    const m = Math.round(Number(input.value.replace(',', '.')) * 100) / 100;
+    if (!(m > 0)) return out.replaceChildren(h('p', { class: 'muted' }, 'Entrez la longueur du linéaire en mètres.'));
+    const found = all.filter((x) => x.meters === m);
+    if (!found.length) {
+      return out.replaceChildren(empty(sizes.length
+        ? `Pas d'implantation prévue pour ${fmt(m)}. Longueurs disponibles : ${sizes.map(fmt).join(', ')}.`
+        : "Aucune implantation n'est encore définie."));
+    }
+    if (found.length === 1) return detail(found[0]);
+    out.replaceChildren(h('h2', {}, `Implantations de ${fmt(m)}`),
+      h('div', { class: 'rows' }, found.map((x) => h('button', { class: 'row', onclick: () => detail(x) },
+        h('div', { class: 'grow' }, h('b', {}, x.name), h('small', {}, `${x.count} référence${x.count > 1 ? 's' : ''}`)), icon('chevron', 18)))));
+  };
+  async function detail(x) {
+    out.replaceChildren(loading());
+    let d;
+    try {
+      d = await api(`/implantations/${x.id}?client=${state.client.id}`);
+    } catch (e) {
+      out.replaceChildren();
+      return fail(e);
+    }
+    const add = h('button', { class: 'btn primary big', disabled: !d.lines.length, onclick: () => {
+      const cart = getCart();
+      for (const l of d.lines) {
+        const item = cart.find((c) => c.productId === l.productId && c.unit === l.unit);
+        if (item) item.qty += l.qty;
+        else cart.push({ productId: l.productId, unit: l.unit, qty: l.qty });
+      }
+      setCart(cart);
+      flyToCart(add);
+      toast(`${d.lines.length} référence${d.lines.length > 1 ? 's' : ''} ajoutée${d.lines.length > 1 ? 's' : ''} au panier`);
+      setTimeout(() => go('/panier'), 900);
+    } }, icon('cart', 22), 'Tout ajouter au panier');
+    out.replaceChildren(
+      h('h2', {}, `${x.name} — ${fmt(x.meters)}`),
+      h('p', { class: 'muted' }, `${d.lines.length} référence${d.lines.length > 1 ? 's' : ''} · prix pour ${state.client.name}`),
+      h('div', { class: 'cartlines' }, d.lines.map((l) => h('div', { class: 'cartline' },
+        h('div', { class: 'grow' }, h('b', {}, l.name),
+          h('small', {}, `Réf. ${l.ref} · ${l.qty} × ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
+          h('small', {}, eur(l.netCents), l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
+        h('b', {}, eur(l.totalCents))))),
+      d.unavailable.length ? h('div', { class: 'card warn' },
+        h('h3', {}, `${d.unavailable.length} référence${d.unavailable.length > 1 ? 's' : ''} sans prix, non ajoutée${d.unavailable.length > 1 ? 's' : ''}`),
+        d.unavailable.map((u) => h('small', {}, `${u.ref} · ${u.name} (${u.qty} × ${u.unitLabel})`))) : null,
+      h('div', { class: 'totals' }, h('div', { class: 'total' }, h('span', {}, "Total de l'implantation (HT)"), h('b', {}, eur(d.totalCents)))),
+      add,
+      h('p', { class: 'muted center' }, 'Les quantités restent modifiables dans le panier.'));
+  }
+  $view.replaceChildren(h('div', { class: 'pad' },
+    orderClientBar(implantationView),
+    h('h2', {}, 'Combien de mètres de linéaire ?'),
+    h('form', { class: 'metersrow', onsubmit: (e) => { e.preventDefault(); input.blur(); show(); } },
+      input, h('span', {}, 'm'), h('button', { class: 'btn primary', type: 'submit' }, 'Voir')),
+    sizes.length ? h('div', { class: 'sizechips' }, sizes.map((m) =>
+      h('button', { class: 'chipbtn', onclick: () => { input.value = String(m).replace('.', ','); show(); } }, fmt(m)))) : null,
+    out));
+  show();
 }
 
 // ---------- Promos ----------

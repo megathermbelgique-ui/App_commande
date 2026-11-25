@@ -4,7 +4,7 @@ const dNorm = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').to
 const dErr = (status, message) => Object.assign(new Error(message), { status });
 const D_UNITS = { piece: 'Pièce', boite: 'Boîte', carton: 'Carton', palette: 'Palette' };
 const D_STATUS = { recue: 'Reçue', preparation: 'En préparation', expediee: 'Expédiée', livree: 'Livrée', annulee: 'Annulée' };
-const D_KEY = 'demo-admin:v1';
+const D_KEY = 'demo-admin:v2';
 let dState = null;
 let dUser = null;
 try { dUser = JSON.parse(sessionStorage.getItem(D_KEY + ':user')); } catch {}
@@ -153,6 +153,37 @@ async function api(path, { method = 'GET', body } = {}) {
     c.number ||= 'C' + String(c.id).padStart(5, '0');
     if (!m) S.clients.push(c);
     return done({ client: c });
+  }
+
+  // Implantations
+  if (route === '/admin/implantations' && method === 'GET') {
+    return { implantations: [...S.implantations].sort((a, b) => a.meters - b.meters || a.name.localeCompare(b.name, 'fr'))
+      .map((x) => ({ id: x.id, name: x.name, meters: x.meters, active: x.active !== false, count: x.items.length })) };
+  }
+  if (route === '/admin/implantations' && method === 'POST' || (m = route.match(/^\/admin\/implantations\/(\d+)$/))) {
+    if (method === 'DELETE') { S.implantations = S.implantations.filter((x) => x.id !== Number(m[1])); return done({ ok: true }); }
+    const x = m ? dFind(S.implantations, m[1], 'Implantation') : { id: dNext(S.implantations), items: [] };
+    if (method === 'GET') {
+      return { implantation: { id: x.id, name: x.name, meters: x.meters, active: x.active !== false, items: x.items.map((i) => {
+        const p = S.products.find((e) => e.id === i.productId);
+        return { ref: p?.ref || '', name: p?.name || '', unit: i.unit, qty: i.qty };
+      }) } };
+    }
+    const len = Math.round(Number(body.meters) * 100) / 100;
+    if (!String(body.name || '').trim()) throw dErr(400, 'Nom obligatoire.');
+    if (!(len > 0)) throw dErr(400, 'Longueur en mètres invalide.');
+    const items = [];
+    const unknown = [];
+    for (const it of body.items || []) {
+      const key = String(it.ref).toLowerCase();
+      const p = S.products.find((e) => e.ref.toLowerCase() === key) || S.products.find((e) => e.code && e.code === it.ref);
+      if (!p) unknown.push(it.ref);
+      else items.push({ productId: p.id, unit: D_UNITS[it.unit] ? it.unit : 'piece', qty: Math.max(1, Math.floor(Number(it.qty)) || 1) });
+    }
+    if (unknown.length) throw dErr(400, `Référence(s) inconnue(s) : ${unknown.slice(0, 10).join(', ')}`);
+    Object.assign(x, { name: body.name.trim(), meters: len, active: body.active !== false, items });
+    if (!m) S.implantations.push(x);
+    return done({ id: x.id });
   }
 
   // Promos

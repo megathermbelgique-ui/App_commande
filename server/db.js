@@ -105,6 +105,19 @@ CREATE TABLE IF NOT EXISTS promos (
   ends_on TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS implantations (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  meters REAL NOT NULL,                 -- longueur de linéaire, en mètres
+  active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS implantation_items (
+  id INTEGER PRIMARY KEY,
+  implantation_id INTEGER NOT NULL REFERENCES implantations(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  unit TEXT NOT NULL DEFAULT 'piece',
+  qty INTEGER NOT NULL DEFAULT 1
+);
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY,
   number TEXT NOT NULL DEFAULT '',

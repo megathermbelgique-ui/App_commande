@@ -28,6 +28,10 @@ const clients = q('SELECT * FROM clients ORDER BY id').all().map((c) => {
 });
 const promos = q('SELECT * FROM promos').all().map((p) => ({ id: p.id, title: p.title, description: p.description,
   productId: p.product_id, minQty: p.min_qty, discountPct: p.discount_pct, startsOn: p.starts_on, endsOn: p.ends_on, active: true }));
+const implantations = q('SELECT * FROM implantations WHERE active = 1 ORDER BY meters, name').all().map((m) => ({
+  id: m.id, name: m.name, meters: m.meters, active: true,
+  items: q('SELECT product_id AS productId, unit, qty FROM implantation_items WHERE implantation_id = ? ORDER BY id').all(m.id),
+}));
 const priced = products.filter((p) => p.units.length);
 const scans = [priced[15], priced[19], priced[0], priced[24], priced[4]].map((p) => {
   const u = p.units[Math.min(1, p.units.length - 1)];
@@ -47,7 +51,7 @@ for (let i = 0, n = 0; i < files.length; i += 60, n++) {
   fs.writeFileSync(path.join(OUT, `img-${n}.json`), JSON.stringify(pack));
 }
 fs.writeFileSync(path.join(OUT, 'data.json'), JSON.stringify({
-  categories: q('SELECT id, name, sort FROM categories ORDER BY sort, name').all(), products, clients, promos, scans, imageChunk,
+  categories: q('SELECT id, name, sort FROM categories ORDER BY sort, name').all(), products, clients, promos, scans, imageChunk, implantations,
 }));
 
 const strip = (src) => src.replace(/^import .*$/gm, '').replace(/^export /gm, '');
@@ -108,7 +112,7 @@ fs.writeFileSync(path.join(ADM, 'data.json'), JSON.stringify({
   categories: q('SELECT id, name, sort FROM categories ORDER BY sort, name').all(),
   products: products.map((p) => ({ ...p, active: true })),
   clients: clients.map((c, i) => ({ ...c, delegateId: i < 2 ? 2 : null, discounts: [] })),
-  promos, users, orders, settings: store.settings(),
+  promos, users, orders, implantations, settings: store.settings(),
 }));
 fs.copyFileSync(path.join(ROOT, 'node_modules/exceljs/dist/exceljs.min.js'), path.join(ADM, 'exceljs.min.js'));
 fs.copyFileSync(path.join(ROOT, 'node_modules/pdfkit/js/pdfkit.standalone.js'), path.join(ADM, 'pdfkit.standalone.js'));
