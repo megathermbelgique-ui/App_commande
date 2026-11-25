@@ -90,3 +90,17 @@ legend { font-weight: 700; padding: 0 6px; font-size: .85rem; color: #3d4551; }
 .notice.ok { background: #e9f8ee; border-color: #b4e2c4; }
 pre { background: #f6f7f9; padding: 10px; border-radius: 8px; overflow-x: auto; margin: 0; font-size: .85rem; }
 @media (max-width: 800px) { .grid3, .grid4, .cols { grid-template-columns: 1fr 1fr; } }
+
+.subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.subtabs button { background: #fff; border: 1px solid #c8ced6; border-radius: 20px; padding: 7px 14px; cursor: pointer; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.subtabs button span { background: var(--bg); border-radius: 10px; padding: 0 7px; font-size: .8rem; color: var(--muted); }
+.subtabs button.on { background: var(--ink); border-color: var(--ink); color: #fff; }
+.subtabs button.on span { background: #ffffff26; color: #fff; }
+.province { margin-bottom: 20px; }
+.province h3 { font-size: 1rem; margin-bottom: 8px; }
+.province h3 .muted { font-weight: 400; font-size: .9rem; }
+tr.grouprow td { background: #eef0f3; font-weight: 700; }
+.proof { display: flex; gap: 16px; flex-wrap: wrap; }
+.proof figure { margin: 0; font-size: .8rem; color: var(--muted); }
+.proof img { display: block; max-height: 220px; max-width: 100%; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.unitsave { font-size: .8rem; color: var(--ok); font-weight: 600; white-space: nowrap; }

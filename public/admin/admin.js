@@ -110,6 +110,7 @@ function login(message = '') {
 // ---------- Structure ----------
 const TABS = {
   commandes: ['Commandes', ordersTab],
+  factures: ['Factures et crédit', invoicesTab],
   articles: ['Articles et prix', productsTab],
   categories: ['Catégories', categoriesTab],
   clients: ['Clients et remises', clientsTab],
@@ -133,63 +134,165 @@ function shell() {
 const reload = () => TABS[tab][1]().catch(oops);
 
 // ---------- Commandes ----------
-const orderFilter = { status: '', q: '' };
+const orderFilter = { status: 'recue', q: '' };
+const ORDER_VIEWS = [['recue', 'Reçues'], ['preparation', 'En préparation'], ['expediee', 'Expédiées'], ['livree', 'Livrées'], ['annulee', 'Annulées'], ['', 'Toutes']];
+const payChip = (o) => (!o.invoiceNumber ? h('span', { class: 'muted' }, 'Non facturée')
+  : o.paidOn ? h('span', { class: 'chip st-livree' }, 'Payée')
+  : o.late ? h('span', { class: 'chip st-annulee' }, `En retard${o.reminders ? ` · ${o.reminders} rappel${o.reminders > 1 ? 's' : ''}` : ''}`)
+  : h('span', { class: 'chip st-preparation' }, `À payer le ${frDay(o.dueOn)}`));
 async function ordersTab() {
   const params = new URLSearchParams(orderFilter);
-  const { orders } = await api('/orders?' + params);
+  const [{ orders }, all] = await Promise.all([api('/orders?' + params), api('/orders')]);
+  const count = (st) => all.orders.filter((o) => !st || o.status === st).length;
   const search = h('input', { type: 'search', placeholder: 'N° de commande, client, délégué…', value: orderFilter.q,
     onchange: () => { orderFilter.q = search.value; reload(); } });
+  const row = (o) => h('tr', { class: 'click', onclick: () => orderModal(o.id).catch(oops) },
+    h('td', {}, h('b', {}, o.number)),
+    h('td', {}, frDate(o.createdAt)),
+    h('td', {}, o.client.name, h('div', { class: 'muted' }, [o.client.number, o.client.del_city || o.client.hq_city].filter(Boolean).join(' · '))),
+    h('td', {}, o.userName),
+    h('td', { class: 'num' }, eur(o.totalCents)),
+    h('td', {}, payChip(o)),
+    h('td', { onclick: (e) => e.stopPropagation() },
+      select(STATUSES, o.status, { onchange: async (e) => {
+        await api(`/admin/orders/${o.id}`, { method: 'PATCH', body: { status: e.target.value } }).then(reload, oops);
+      } })),
+    h('td', { onclick: (e) => e.stopPropagation() },
+      fileLink('btn small', `/api/orders/${o.id}/pdf?dl=1`, 'Télécharger')));
+  const headers = ['N°', 'Date', 'Client', 'Délégué', { num: 'Total HT' }, 'Paiement', 'Statut', 'PDF'];
+  // Commandes à livrer : regroupées par province pour préparer les tournées.
+  const byProvince = ['recue', 'preparation', 'expediee'].includes(orderFilter.status);
+  const provinces = [...new Set(orders.map((o) => o.province))].sort((a, b) => a.localeCompare(b, 'fr'));
   main.replaceChildren(
-    h('div', { class: 'toolbar' }, h('h2', {}, 'Commandes reçues'),
+    h('div', { class: 'toolbar' }, h('h2', {}, 'Commandes'),
       search,
-      select([['', 'Tous les statuts'], ...STATUSES], orderFilter.status, { onchange: (e) => { orderFilter.status = e.target.value; reload(); } }),
       fileLink('btn', '/api/admin/orders/export?' + params, 'Exporter en Excel'),
       h('button', { class: 'btn', onclick: reload }, 'Actualiser')),
-    table(['N°', 'Date', 'Client', 'Délégué', { num: 'Total HT' }, 'Statut', 'PDF'], orders.map((o) =>
-      h('tr', { class: 'click', onclick: () => orderModal(o.id).catch(oops) },
-        h('td', {}, h('b', {}, o.number)),
-        h('td', {}, frDate(o.createdAt)),
-        h('td', {}, o.client.name, h('div', { class: 'muted' }, [o.client.number, o.client.hq_city].filter(Boolean).join(' · '))),
-        h('td', {}, o.userName),
-        h('td', { class: 'num' }, eur(o.totalCents)),
-        h('td', { onclick: (e) => e.stopPropagation() },
-          select(STATUSES, o.status, { onchange: async (e) => {
-            await api(`/admin/orders/${o.id}`, { method: 'PATCH', body: { status: e.target.value } }).catch(oops);
-          } })),
-        h('td', { onclick: (e) => e.stopPropagation() },
-          fileLink('btn small', `/api/orders/${o.id}/pdf?dl=1`, 'Télécharger')))),
-      'Aucune commande.'));
+    h('div', { class: 'subtabs' }, ORDER_VIEWS.map(([st, label]) =>
+      h('button', { class: st === orderFilter.status ? 'on' : '', onclick: () => { orderFilter.status = st; reload(); } },
+        label, h('span', {}, count(st))))),
+    ...(byProvince && orders.length
+      ? provinces.map((pr) => {
+          const list = orders.filter((o) => o.province === pr);
+          return h('section', { class: 'province' },
+            h('h3', {}, pr, h('span', { class: 'muted' }, ` · ${list.length} commande${list.length > 1 ? 's' : ''} · ${eur(list.reduce((t, o) => t + o.totalCents, 0))} HT`)),
+            table(headers, list.map(row)));
+        })
+      : [table(headers, orders.map(row), 'Aucune commande.')]));
 }
 
 async function orderModal(id) {
-  const { order: o, lines } = await api(`/orders/${id}`);
+  const { order: o, lines, hasProof } = await api(`/orders/${id}`);
+  const proof = hasProof ? (await api(`/orders/${id}/proof`)).proof : null;
   const c = o.client;
   const hasDel = c.del_address || c.del_city;
   const vat = Math.round((o.totalCents * o.vatPct) / 100);
-  modal(`Commande ${o.number}`, [
-    h('p', { class: 'muted' }, `${frDate(o.createdAt)} · Délégué : ${o.userName} · `, h('span', { class: `chip st-${o.status}` }, o.statusLabel)),
+  // Articles libres d'abord, puis un bloc par implantation.
+  const groups = [];
+  for (const l of lines) {
+    const key = l.implantationId || 0;
+    let g = groups.find((x) => x.key === key);
+    if (!g) groups.push((g = { key, name: l.implantationName, extra: l.extraPct, lines: [] }));
+    g.lines.push(l);
+  }
+  groups.sort((x, y) => (y.key === 0) - (x.key === 0));
+  const lineRow = (l) => h('tr', {},
+    h('td', {}, l.ref), h('td', {}, l.name), h('td', { class: 'num' }, l.qty),
+    h('td', {}, l.unitQty > 1 ? `${l.unitLabel} (${l.unitQty} pcs)` : l.unitLabel),
+    h('td', { class: 'num' }, eur(l.netCents)),
+    h('td', { class: 'num' }, [l.discountPct ? pctText(l.discountPct) + (l.promo ? ' promo' : '') : '', l.extraPct ? `+ ${pctText(l.extraPct)}` : ''].filter(Boolean).join(' ')),
+    h('td', { class: 'num' }, eur(l.totalCents)));
+  const rows = groups.flatMap((g) => [
+    g.key ? h('tr', { class: 'grouprow' }, h('td', { colspan: 6 }, `Implantation ${g.name}`,
+        g.extra ? ` — remise implantation ${pctText(g.extra)}` : ''), h('td', { class: 'num' }, eur(g.lines.reduce((t, l) => t + l.totalCents, 0))))
+      : groups.length > 1 ? h('tr', { class: 'grouprow' }, h('td', { colspan: 7 }, 'Autres articles')) : null,
+    ...g.lines.map(lineRow)]).filter(Boolean);
+  let dlg;
+  const act = (body, path = `/admin/orders/${o.id}`, method = 'PATCH') => async () => {
+    try {
+      await api(path, { method, body });
+      dlg.close();
+      reload();
+      orderModal(id).catch(oops);
+    } catch (e) {
+      oops(e);
+    }
+  };
+  dlg = modal(`Commande ${o.number}`, [
+    h('p', { class: 'muted' }, `${frDate(o.createdAt)} · Délégué : ${o.userName} · ${o.province} · `, h('span', { class: `chip st-${o.status}` }, o.statusLabel)),
     h('div', { class: 'cols' },
       h('fieldset', {}, h('legend', {}, 'Client — siège social'), h('div', { class: 'addr' },
         [c.name, c.hq_address, `${c.hq_zip} ${c.hq_city}`.trim(), c.vat && `TVA : ${c.vat}`, c.number && `N° client : ${c.number}`, c.phone, c.email].filter(Boolean).join('\n'))),
       h('fieldset', {}, h('legend', {}, 'Livraison'), h('div', { class: 'addr' },
         [c.name, hasDel ? c.del_address : c.hq_address, (hasDel ? `${c.del_zip} ${c.del_city}` : `${c.hq_zip} ${c.hq_city}`).trim(),
           c.hours && `Horaires : ${c.hours}`, c.manager_name && `Contact : ${c.manager_name} ${c.manager_phone}`].filter(Boolean).join('\n')))),
-    table(['Réf.', 'Désignation', { num: 'Qté' }, 'Unité', { num: 'PU HT' }, { num: 'Remise' }, { num: 'Total HT' }], lines.map((l) => h('tr', {},
-      h('td', {}, l.ref), h('td', {}, l.name), h('td', { class: 'num' }, l.qty),
-      h('td', {}, l.unitQty > 1 ? `${l.unitLabel} (${l.unitQty} pcs)` : l.unitLabel),
-      h('td', { class: 'num' }, eur(l.netCents)),
-      h('td', { class: 'num' }, l.discountPct ? pctText(l.discountPct) + (l.promo ? ' promo' : '') : ''),
-      h('td', { class: 'num' }, eur(l.totalCents))))),
+    table(['Réf.', 'Désignation', { num: 'Qté' }, 'Unité', { num: 'PU HT' }, { num: 'Remise' }, { num: 'Total HT' }], rows),
     h('div', { class: 'totals' },
       h('div', {}, h('span', {}, 'Total HT'), h('span', {}, eur(o.totalCents))),
       h('div', {}, h('span', {}, `TVA ${pctText(o.vatPct)}`), h('span', {}, eur(vat))),
       h('div', { class: 'big' }, h('span', {}, 'Total TTC'), h('span', {}, eur(o.totalCents + vat)))),
     o.note ? h('div', { class: 'notice' }, h('b', {}, 'Remarque : '), o.note) : null,
+    h('fieldset', {}, h('legend', {}, 'Facture et paiement'),
+      o.invoiceNumber
+        ? h('div', { class: 'toolbar', style: { margin: 0 } },
+            h('span', {}, h('b', {}, o.invoiceNumber), ` du ${frDay(o.invoicedOn)} · échéance ${frDay(o.dueOn)} · `, payChip(o),
+              o.lastReminderOn ? ` · dernier rappel le ${frDay(o.lastReminderOn)}` : ''),
+            fileLink('btn small', `/api/admin/orders/${o.id}/invoice.pdf?dl=1`, 'Facture PDF'),
+            o.paidOn ? h('button', { class: 'btn small', type: 'button', onclick: act({ paid: false }) }, 'Annuler le paiement')
+              : [h('button', { class: 'btn small', type: 'button', onclick: act({ reminder: true }) }, 'Noter un rappel'),
+                 h('button', { class: 'btn small primary', type: 'button', onclick: act({ paid: true }) }, 'Marquer payée')])
+        : h('div', { class: 'toolbar', style: { margin: 0 } }, h('span', { class: 'muted' }, 'Pas encore facturée.'),
+            h('button', { class: 'btn small primary', type: 'button', onclick: act(undefined, `/admin/orders/${o.id}/invoice`, 'POST') }, 'Créer la facture'))),
+    h('fieldset', {}, h('legend', {}, 'Livraison'),
+      proof
+        ? [h('p', {}, 'Reçu par ', h('b', {}, proof.receivedBy), ` le ${frDate(proof.createdAt)}`, proof.userName ? ` · livreur : ${proof.userName}` : ''),
+           h('div', { class: 'proof' },
+             h('figure', {}, h('img', { src: proof.signature, alt: 'Signature du réceptionnaire' }), h('figcaption', {}, 'Signature')),
+             proof.photo ? h('figure', {}, h('img', { src: proof.photo, alt: 'Photo prise à la livraison' }), h('figcaption', {}, 'Photo de la livraison')) : null)]
+        : h('p', { class: 'muted' }, o.status === 'livree' ? 'Livrée, sans signature enregistrée.' : 'Pas encore livrée. Le livreur fera signer le client dans l\'application.'),
+      h('div', {}, fileLink('btn small', `/api/orders/${o.id}/delivery.pdf?dl=1`, proof ? 'Bon de livraison signé (PDF)' : 'Bon de livraison (PDF)'))),
   ], { extra: [
-    DEMO ? null : h('a', { class: 'btn', href: `/api/orders/${o.id}/pdf`, target: '_blank', rel: 'noopener' }, 'Ouvrir le PDF'),
     fileLink('btn', `/api/admin/orders/export?id=${o.id}`, 'Excel'),
-    fileLink('btn primary', `/api/orders/${o.id}/pdf?dl=1`, 'Télécharger le PDF'),
+    fileLink('btn primary', `/api/orders/${o.id}/pdf?dl=1`, 'Bon de commande PDF'),
   ] });
+}
+
+// ---------- Factures et crédit ----------
+let invoiceView = 'open';
+async function invoicesTab() {
+  const [{ orders }, { clients }] = await Promise.all([api('/orders'), api('/admin/credit')]);
+  const invoices = orders.filter((o) => o.invoiceNumber && o.status !== 'annulee');
+  const views = { open: ['À payer', (o) => !o.paidOn], late: ['En retard', (o) => o.late], paid: ['Payées', (o) => o.paidOn], all: ['Toutes', () => true] };
+  const list = invoices.filter(views[invoiceView][1]);
+  const toBill = orders.filter((o) => !o.invoiceNumber && o.status !== 'annulee');
+  const patch = (o, body) => () => api(`/admin/orders/${o.id}`, { method: 'PATCH', body }).then(reload, oops);
+  main.replaceChildren(
+    h('div', { class: 'toolbar' }, h('h2', {}, 'Factures et crédit')),
+    h('div', { class: 'subtabs' }, Object.entries(views).map(([key, [label, test]]) =>
+      h('button', { class: key === invoiceView ? 'on' : '', onclick: () => { invoiceView = key; reload(); } }, label, h('span', {}, invoices.filter(test).length)))),
+    table(['Facture', 'Date', 'Échéance', 'Client', 'Commande', { num: 'Total TTC' }, 'État', 'Rappels', ''], list.map((o) =>
+      h('tr', { class: 'click', onclick: () => orderModal(o.id).catch(oops) },
+        h('td', {}, h('b', {}, o.invoiceNumber)), h('td', {}, frDay(o.invoicedOn)), h('td', {}, frDay(o.dueOn)),
+        h('td', {}, o.client.name), h('td', {}, o.number), h('td', { class: 'num' }, eur(o.totalTtcCents)), h('td', {}, payChip(o)),
+        h('td', {}, o.reminders ? `${o.reminders} · ${frDay(o.lastReminderOn)}` : '—'),
+        h('td', { class: 'num', onclick: (e) => e.stopPropagation() },
+          fileLink('btn small', `/api/admin/orders/${o.id}/invoice.pdf?dl=1`, 'PDF'), ' ',
+          o.paidOn ? null : [h('button', { class: 'btn small', onclick: patch(o, { reminder: true }) }, 'Noter un rappel'), ' ',
+            h('button', { class: 'btn small primary', onclick: patch(o, { paid: true }) }, 'Payée')]))), 'Aucune facture.'),
+    toBill.length ? h('p', { class: 'muted', style: { margin: '12px 0 0' } },
+      `${toBill.length} commande${toBill.length > 1 ? 's' : ''} pas encore facturée${toBill.length > 1 ? 's' : ''} : ouvrez la commande et choisissez « Créer la facture ».`) : null,
+    h('div', { class: 'toolbar', style: { marginTop: '26px' } }, h('h2', {}, 'Encours par client')),
+    table(['Client', { num: 'Encours TTC non payé' }, { num: 'Limite de crédit' }, { num: 'Disponible' }, 'Factures en retard', 'État'], clients.map((c) => {
+      const over = c.limitCents != null && c.outstandingCents >= c.limitCents;
+      return h('tr', {}, h('td', {}, h('b', {}, c.name), h('div', { class: 'muted' }, c.number)),
+        h('td', { class: 'num' }, eur(c.outstandingCents)), h('td', { class: 'num' }, c.limitCents != null ? eur(c.limitCents) : '—'),
+        h('td', { class: 'num' }, c.limitCents != null ? eur(Math.max(0, c.limitCents - c.outstandingCents)) : '—'),
+        h('td', {}, c.late || '—'),
+        h('td', {}, c.onHold ? h('span', { class: 'chip st-annulee' }, 'En attente') : over ? h('span', { class: 'chip st-annulee' }, 'Limite atteinte') : h('span', { class: 'chip st-livree' }, 'Peut commander')));
+    }), 'Aucun encours.'),
+    h('p', { class: 'muted', style: { marginTop: '12px' } },
+      "L'encours compte toutes les commandes non annulées et non payées, TVA comprise. Un client ne peut plus commander si son encours plus la nouvelle commande dépasse sa limite, ",
+      'ou s\'il est mis « en attente ». La limite et la mise en attente se règlent dans la fiche du client.'));
 }
 
 // ---------- Articles ----------
@@ -220,7 +323,7 @@ async function productsTab() {
 }
 
 // Bouton d'import : fichier Excel (.xlsx) ou CSV, envoyé au serveur puis compte rendu.
-function importInput(url, summary) {
+function importInput(url, summary, extra = {}) {
   const file = h('input', { type: 'file', accept: '.xlsx,.csv', hidden: true, onchange: async () => {
     const f = file.files[0];
     file.value = '';
@@ -234,7 +337,7 @@ function importInput(url, summary) {
         for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
         body = { xlsx: btoa(bin) };
       } else throw new Error('Format non reconnu : choisissez un fichier .xlsx ou .csv (un ancien .xls doit être réenregistré en .xlsx).');
-      const r = await api(url, { method: 'POST', body });
+      const r = await api(url, { method: 'POST', body: { ...body, ...extra } });
       modal('Import terminé', [
         h('div', { class: 'notice ok' }, summary(r)),
         r.errors.length ? h('div', { class: 'notice' }, h('b', {}, `${r.errors.length} ligne(s) ignorée(s) :`), h('pre', {}, r.errors.join('\n'))) : null]);
@@ -281,8 +384,25 @@ async function productModal(id, categories) {
     const qty = h('input', { type: 'number', min: 1, value: u ? u.qty : unit === 'piece' ? 1 : '', disabled: unit === 'piece' });
     const price = text(u ? euroIn(u.priceCents) : '', { inputmode: 'decimal', placeholder: '0,00' });
     const ean = text(u?.ean, { placeholder: 'Code-barres' });
-    return { unit, label, on, qty, price, ean };
+    return { unit, label, on, qty, price, ean, save: h('span', { class: 'unitsave' }) };
   });
+  // Écart de prix par pièce entre un conditionnement et la pièce : « -5 % » si le pourcentage tombe rond, sinon en euros.
+  const drawSaves = () => {
+    const base = rows.find((r) => r.on.checked && euroOut(r.price.value) > 0);
+    const basePiece = base ? euroOut(base.price.value) / (Number(base.qty.value) || 1) : 0;
+    for (const r of rows) {
+      const cents = euroOut(r.price.value);
+      const n = Number(r.qty.value) || 1;
+      r.save.textContent = '';
+      if (!r.on.checked || r === base || !basePiece || !cents || n <= (Number(base.qty.value) || 1)) continue;
+      const pct = (1 - cents / n / basePiece) * 100;
+      const diff = Math.round(basePiece - cents / n);
+      if (pct < 0.05) { r.save.textContent = pct < -0.05 ? 'plus cher à la pièce' : ''; continue; }
+      r.save.textContent = Math.abs(pct - Math.round(pct)) < 0.05 ? `-${Math.round(pct)} %` : `-${eur(diff)} par pièce`;
+    }
+  };
+  for (const r of rows) for (const el of [r.on, r.qty, r.price]) el.addEventListener('input', drawSaves);
+  drawSaves();
   const barcodes = h('div', { class: 'barcodes' });
   const drawBarcodes = () => barcodes.replaceChildren(...rows.filter((r) => r.on.checked).map((r) => {
     const svg = ean13Svg(r.ean.value.trim());
@@ -296,8 +416,8 @@ async function productModal(id, categories) {
     f('Fiche technique — une caractéristique par ligne, « Nom: valeur » (une ligne sans « : » devient un sous-titre)', specs),
     h('fieldset', {}, h('legend', {}, 'Conditionnements et prix HT'),
       h('table', { class: 'units' },
-        h('thead', {}, h('tr', {}, ['', 'Conditionnement', 'Nombre de pièces', 'Prix HT du conditionnement (€)', 'Code-barres (EAN)'].map((x) => h('th', {}, x)))),
-        h('tbody', {}, rows.map((r) => h('tr', {}, h('td', {}, r.on), h('td', {}, r.label), h('td', {}, r.qty), h('td', {}, r.price),
+        h('thead', {}, h('tr', {}, ['', 'Conditionnement', 'Nombre de pièces', 'Prix HT du conditionnement (€)', 'Avantage', 'Code-barres (EAN)'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, rows.map((r) => h('tr', {}, h('td', {}, r.on), h('td', {}, r.label), h('td', {}, r.qty), h('td', {}, r.price), h('td', {}, r.save),
           h('td', {}, r.ean))))),
       h('div', {}, h('button', { class: 'btn small', type: 'button', onclick: drawBarcodes }, 'Afficher les codes-barres')),
       barcodes,
@@ -329,8 +449,10 @@ async function categoriesTab() {
     table(['Nom', 'Ordre d\'affichage', { num: 'Articles' }, ''], categories.map((c) => {
       const n = text(c.name);
       const s = h('input', { type: 'number', value: c.sort, style: { width: '90px' } });
+      const catFile = importInput('/admin/products/import', (r) => `${r.created} article(s) créé(s), ${r.updated} mis à jour, tous rangés dans « ${c.name} ».`, { categoryId: c.id });
       return h('tr', {}, h('td', {}, n), h('td', {}, s), h('td', { class: 'num' }, c.count),
         h('td', { class: 'num' },
+          catFile, h('button', { class: 'btn small', title: 'Tous les articles du fichier seront rangés dans cette catégorie', onclick: () => catFile.click() }, 'Importer un Excel ici'), ' ',
           h('button', { class: 'btn small', onclick: () => api(`/admin/categories/${c.id}`, { method: 'PUT', body: { name: n.value, sort: Number(s.value) } }).then(reload, oops) }, 'Enregistrer'), ' ',
           h('button', { class: 'btn small danger', disabled: c.count > 0, title: c.count ? 'Catégorie non vide' : '',
             onclick: async () => (await ask(`Supprimer la catégorie « ${c.name} » ?`, 'Supprimer')) && api(`/admin/categories/${c.id}`, { method: 'DELETE' }).then(reload, oops) }, 'Supprimer')));
@@ -365,6 +487,8 @@ async function clientModal(id, users) {
   const ta = (key, label, rows) => f(label, (inp[key] = area(c[key], rows)));
   const discount = text(String(c.discountPct ?? 0).replace('.', ','), { inputmode: 'decimal' });
   const franco = text(euroIn(c.francoCents), { inputmode: 'decimal', placeholder: 'Franco général' });
+  const limit = text(euroIn(c.creditLimitCents), { inputmode: 'decimal', placeholder: 'Pas de limite' });
+  const hold = check('Client en attente : plus aucune commande possible', c.onHold);
   const delegate = select([['', 'Tous les délégués'], ...users.filter((u) => u.active).map((u) => [u.id, u.name || u.username])], c.delegateId);
   const active = check('Client actif', c.active);
   const list = h('tbody', {});
@@ -395,6 +519,8 @@ async function clientModal(id, users) {
     ta('notes', 'Informations complémentaires', 2),
     h('fieldset', {}, h('legend', {}, 'Conditions commerciales'),
       h('div', { class: 'grid3' }, f('Remise générale (%)', discount), f('Franco spécifique (€ HT)', franco), f('Délégué attitré', delegate)),
+      h('div', { class: 'grid3' }, f('Limite de crédit (€ TTC)', limit),
+        f('Encours actuel (TTC, non payé)', text(data.credit ? euroIn(data.credit.outstandingCents) : '0,00', { disabled: true })), h('div', { style: { alignSelf: 'end', paddingBottom: '8px' } }, hold.el)),
       h('p', { class: 'muted' }, 'Remises particulières : la remise sur un article prime sur celle de sa catégorie, qui prime sur la remise générale.'),
       h('table', { class: 'units' }, h('thead', {}, h('tr', {}, ['Type', 'Catégorie / article', 'Remise (%)', ''].map((x) => h('th', {}, x)))), list),
       h('div', {}, h('button', { class: 'btn small', type: 'button', onclick: () => addLine() }, 'Ajouter une remise particulière'))),
@@ -404,6 +530,8 @@ async function clientModal(id, users) {
     body.discountPct = num(discount.value);
     body.francoCents = franco.value.trim() === '' ? null : euroOut(franco.value);
     body.delegateId = delegate.value || null;
+    body.creditLimitCents = limit.value.trim() === '' ? null : euroOut(limit.value);
+    body.onHold = hold.input.checked;
     body.active = active.input.checked;
     body.discounts = lines.map((l) => (l.kind.value === 'category'
       ? { kind: 'category', targetId: Number(l.cat.value), pct: num(l.pct.value) }
@@ -465,9 +593,9 @@ async function implantationsTab() {
   main.replaceChildren(
     h('div', { class: 'toolbar' }, h('h2', {}, 'Implantations'),
       h('button', { class: 'btn primary', onclick: () => implantationModal(null).catch(oops) }, 'Nouvelle implantation')),
-    table(['Nom', { num: 'Longueur' }, { num: 'Références' }, 'État'], implantations.map((m) =>
+    table(['Nom', { num: 'Longueur' }, { num: 'Références' }, { num: 'Remise suppl.' }, 'État'], implantations.map((m) =>
       h('tr', { class: 'click' + (m.active ? '' : ' off'), onclick: () => implantationModal(m.id).catch(oops) },
-        h('td', {}, h('b', {}, m.name)), h('td', { class: 'num' }, metersText(m.meters)), h('td', { class: 'num' }, m.count),
+        h('td', {}, h('b', {}, m.name)), h('td', { class: 'num' }, metersText(m.meters)), h('td', { class: 'num' }, m.count), h('td', { class: 'num' }, m.extraPct ? pctText(m.extraPct) : '—'),
         h('td', {}, m.active ? 'Active' : 'Désactivée'))), 'Aucune implantation.'),
     h('p', { class: 'muted', style: { marginTop: '12px' } },
       "Une implantation est l'assortiment type pour un linéaire d'une longueur donnée. Dans l'application, le délégué entre le nombre de mètres ",
@@ -477,12 +605,14 @@ async function implantationModal(id) {
   const m = id ? (await api(`/admin/implantations/${id}`)).implantation : { active: true, items: [] };
   const name = text(m.name, { required: true, placeholder: 'ex. Outillage à main' });
   const len = text(m.meters != null ? String(m.meters).replace('.', ',') : '', { required: true, inputmode: 'decimal', placeholder: 'ex. 2' });
+  const extra = text(m.extraPct ? String(m.extraPct).replace('.', ',') : '', { inputmode: 'decimal', placeholder: '0' });
   const items = area(m.items.map((i) => [i.ref, i.qty, i.unit].join(' ; ')).join('\n'), 14);
   const active = check('Implantation active (visible dans l\'application)', m.active);
   const units = { '': 'piece', piece: 'piece', pieces: 'piece', pc: 'piece', pce: 'piece', boite: 'boite', boites: 'boite', carton: 'carton', cartons: 'carton', palette: 'palette', palettes: 'palette' };
   const plain = (v) => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   modal(id ? `Implantation ${m.name} — ${metersText(m.meters)}` : 'Nouvelle implantation', [
-    h('div', { class: 'grid2' }, f('Nom *', name), f('Longueur du linéaire (mètres) *', len)),
+    h('div', { class: 'grid3' }, f('Nom *', name), f('Longueur du linéaire (mètres) *', len), f('Remise supplémentaire (%)', extra)),
+    h('p', { class: 'muted' }, 'La remise supplémentaire s\'ajoute à la remise du client, uniquement sur les articles de cette liste commandés via l\'implantation.'),
     f('Articles — un par ligne : référence ; quantité ; unité', items),
     h('p', { class: 'muted' }, 'Unité : piece (par défaut), boite, carton ou palette. Vous pouvez coller directement trois colonnes copiées depuis Excel. ',
       'Le code article à 6 chiffres est accepté à la place de la référence.'),
@@ -503,7 +633,7 @@ async function implantationModal(id) {
       });
       if (!list.length) throw new Error('Ajoutez au moins un article.');
       await api(id ? `/admin/implantations/${id}` : '/admin/implantations', { method: id ? 'PUT' : 'POST',
-        body: { name: name.value, meters: num(len.value), active: active.input.checked, items: list } });
+        body: { name: name.value, meters: num(len.value), extraPct: num(extra.value), active: active.input.checked, items: list } });
       reload();
     },
     extra: id ? [h('button', { class: 'btn danger', type: 'button', onclick: async (e) => {
@@ -523,7 +653,7 @@ async function usersTab() {
     h('div', { class: 'toolbar' }, h('h2', {}, 'Identifiants'), h('button', { class: 'btn primary', onclick: () => userModal(null) }, 'Nouvel identifiant')),
     table(["Nom d'utilisateur", 'Nom', 'Rôle', 'État'], users.map((u) =>
       h('tr', { class: 'click' + (u.active ? '' : ' off'), onclick: () => userModal(u) },
-        h('td', {}, h('b', {}, u.username)), h('td', {}, u.name), h('td', {}, u.role === 'admin' ? 'Administrateur' : 'Délégué'),
+        h('td', {}, h('b', {}, u.username)), h('td', {}, u.name), h('td', {}, { admin: 'Administrateur', livreur: 'Livreur' }[u.role] || 'Délégué'),
         h('td', {}, u.active ? 'Actif' : 'Désactivé')))),
     h('p', { class: 'muted', style: { marginTop: '12px' } },
       'Les délégués utilisent l\'application mobile. Seuls les administrateurs accèdent à cette interface et peuvent modifier les prix et les remises.'));
@@ -531,7 +661,7 @@ async function usersTab() {
 function userModal(u) {
   const username = text(u?.username, { required: true, disabled: !!u });
   const name = text(u?.name);
-  const role = select([['delegue', 'Délégué (application mobile)'], ['admin', 'Administrateur (interface PC + application)']], u?.role || 'delegue');
+  const role = select([['delegue', 'Délégué (prise de commandes)'], ['livreur', 'Livreur (tournée et signatures)'], ['admin', 'Administrateur (interface PC + application)']], u?.role || 'delegue');
   const pass = h('input', { type: 'password', autocomplete: 'new-password', required: !u, minlength: 8, placeholder: u ? 'Laisser vide pour ne pas changer' : '8 caractères minimum' });
   const active = check('Compte actif', u ? u.active : true);
   modal(u ? `Identifiant ${u.username}` : 'Nouvel identifiant', [
@@ -562,7 +692,8 @@ async function settingsTab() {
   const franco = text(euroIn(Number(s.franco_cents)), { inputmode: 'decimal' });
   const blocking = check('Empêcher l\'envoi d\'une commande tant que le franco n\'est pas atteint', s.franco_blocking === '1');
   const vat = text(String(s.vat_pct).replace('.', ','), { inputmode: 'decimal' });
-  const company = { company_name: text(s.company_name), company_address: area(s.company_address, 3), company_vat: text(s.company_vat),
+  const days = h('input', { type: 'number', min: 0, value: s.payment_days ?? 30 });
+  const company = { company_iban: text(s.company_iban), company_name: text(s.company_name), company_address: area(s.company_address, 3), company_vat: text(s.company_vat),
     company_phone: text(s.company_phone), company_email: text(s.company_email) };
   const status = h('span', { class: 'muted' });
   main.replaceChildren(
@@ -571,17 +702,18 @@ async function settingsTab() {
       e.preventDefault();
       try {
         await api('/admin/settings', { method: 'PUT', body: { franco_cents: euroOut(franco.value) ?? 0, franco_blocking: blocking.input.checked,
-          vat_pct: num(vat.value), ...Object.fromEntries(Object.entries(company).map(([k, el]) => [k, el.value])) } });
+          vat_pct: num(vat.value), payment_days: Number(days.value), ...Object.fromEntries(Object.entries(company).map(([k, el]) => [k, el.value])) } });
         status.textContent = 'Enregistré.';
       } catch (err) {
         oops(err);
       }
     } },
       h('fieldset', {}, h('legend', {}, 'Commandes'),
-        h('div', { class: 'grid2' }, f('Franco général (€ HT)', franco), f('Taux de TVA (%)', vat)), blocking.el),
+        h('div', { class: 'grid3' }, f('Franco général (€ HT)', franco), f('Taux de TVA (%)', vat), f('Délai de paiement des factures (jours)', days)), blocking.el),
       h('fieldset', {}, h('legend', {}, 'Votre société (en-tête des bons de commande PDF)'),
         f('Nom', company.company_name), f('Adresse', company.company_address),
-        h('div', { class: 'grid3' }, f('N° de TVA', company.company_vat), f('Téléphone', company.company_phone), f('E-mail', company.company_email))),
+        h('div', { class: 'grid3' }, f('N° de TVA', company.company_vat), f('Téléphone', company.company_phone), f('E-mail', company.company_email)),
+        f('Compte bancaire (IBAN, imprimé sur les factures)', company.company_iban)),
       h('div', { class: 'toolbar', style: { margin: 0 } }, h('button', { class: 'btn primary', type: 'submit' }, 'Enregistrer'), status)));
 }
 

@@ -274,3 +274,26 @@ tr:last-child td, tr:last-child th { border-bottom: 0; }
 .card .search { margin-bottom: 8px; }
 .card .rows { border: 1px solid var(--line); }
 .card .rows:empty { display: none; }
+
+/* Implantations groupées, conseils, crédit, livraisons */
+.cartitem { border-bottom: 1px solid var(--line); }
+.cartitem:last-child { border-bottom: 0; }
+.cartitem .cartline { border-bottom: 0; }
+.hint-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #fff6e5; color: #6b4700; font-size: .9rem; font-weight: 600; padding: 8px 14px; }
+.sheet .hint-line { border-radius: 10px; }
+.hint-line span:not(.icon) { flex: 1; min-width: 160px; }
+.btn.small { min-height: 36px; padding: 6px 12px; font-size: .85rem; }
+details.plan { background: var(--card); border-radius: var(--radius); overflow: hidden; }
+details.plan summary { display: flex; align-items: center; gap: 10px; padding: 14px; cursor: pointer; list-style: none; }
+details.plan summary::-webkit-details-marker { display: none; }
+details.plan summary > .icon:first-child { color: var(--accent); }
+details.plan summary > .icon:last-child { color: #b5bcc6; transition: transform .15s; }
+details.plan[open] summary > .icon:last-child { transform: rotate(90deg); }
+details.plan summary > b { white-space: nowrap; }
+details.plan .cartlines { border-top: 1px solid var(--line); border-radius: 0; }
+details.plan > .btn { margin: 8px 14px 12px; width: calc(100% - 28px); }
+.card.blocked { background: #fbdcdb; }
+.card.blocked h3 { color: #9c2320; }
+em.save { display: block; font-size: .85rem; }
+.sigpad { width: 100%; aspect-ratio: 900 / 330; border: 2px dashed #9aa2ad; border-radius: 12px; background: #fff; touch-action: none; }
+.proofphoto { width: 100%; border-radius: 12px; }

@@ -36,7 +36,7 @@ const setCart = (lines) => {
 };
 function addToCart(product, unit, qty) {
   const lines = getCart();
-  const found = lines.find((l) => l.productId === product.id && l.unit === unit);
+  const found = lines.find((l) => l.productId === product.id && l.unit === unit && !l.implantationId);
   if (found) found.qty += qty;
   else lines.push({ productId: product.id, unit, qty });
   setCart(lines);
@@ -116,7 +116,7 @@ function header(title, { back } = {}) {
   $top.replaceChildren(
     h('div', { class: 'left' },
       back ? h('button', { class: 'iconbtn', 'aria-label': 'Retour', onclick: () => (typeof back === 'string' ? go(back) : goBack()) }, icon('back')) : null,
-      h('button', { class: 'iconbtn', id: 'cartbtn', 'aria-label': 'Panier', onclick: () => go('/panier') },
+      state.user?.role === 'livreur' ? null : h('button', { class: 'iconbtn', id: 'cartbtn', 'aria-label': 'Panier', onclick: () => go('/panier') },
         icon('cart', 26), h('span', { id: 'badge', class: 'badge', hidden: true }))
     ),
     h('h1', {}, title),
@@ -176,6 +176,8 @@ const routes = [
   [/^\/promos$/, promosView],
   [/^\/implantation$/, implantationView],
   [/^\/compte$/, accountView],
+  [/^\/livraisons$/, deliveriesView],
+  [/^\/livraison\/(\d+)$/, deliveryView],
 ];
 function route() {
   if (cleanup) {
@@ -184,7 +186,9 @@ function route() {
   }
   $layer.querySelectorAll('.sheet-wrap').forEach((s) => s.remove());
   if (!state.user) return showLogin();
-  const path = currentPath();
+  let path = currentPath();
+  // Un livreur n'a accès qu'à sa tournée et à son compte.
+  if (state.user.role === 'livreur' && !/^\/(livraisons?|compte)/.test(path)) path = '/livraisons';
   $view.className = '';
   $view.scrollTop = 0;
   for (const [re, fn] of routes) {
@@ -249,7 +253,8 @@ function home() {
         tile('/implantation', 'ruler', 'Implantation', 'Assortiment au mètre'),
         tile('/commandes', 'list', 'Commandes passées', 'Suivi et statuts'),
         tile('/clients', 'people', 'Clients', 'Fiches et nouveaux clients'),
-        tile('/promos', 'tag', 'Promos', 'Offres du moment', 'wide low')))
+        tile('/promos', 'tag', 'Promos', 'Offres du moment', state.user.role === 'admin' ? '' : 'wide low'),
+        state.user.role === 'admin' ? tile('/livraisons', 'truck', 'Livraisons', 'Tournée et signatures') : null))
   );
 }
 
@@ -290,11 +295,12 @@ function openAddSheet(product, presetUnit, onClose = () => {}) {
   }
   const unitLabel = (u) => (u.qty > 1 ? `${u.label} ×${u.qty}` : u.label);
   const select = h('select', { 'aria-label': 'Conditionnement', onchange: refresh },
-    units.map((u) => h('option', { value: u.unit, selected: u.unit === presetUnit }, `${unitLabel(u)} — ${eur(u.netCents)}`)));
+    units.map((u) => h('option', { value: u.unit, selected: u.unit === presetUnit }, `${unitLabel(u)} — ${eur(u.netCents)}${u.saving ? ` (${u.saving.label})` : ''}`)));
   const input = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: 1, 'aria-label': 'Quantité',
     oninput: () => { qty = Math.max(0, Math.floor(Number(input.value)) || 0); refresh(false); },
     onblur: () => { if (qty < 1) { qty = 1; refresh(); } } });
   const price = h('div', { class: 'sheet-price' });
+  const tip = h('div', { class: 'hint-line', hidden: true });
   const step = (d) => { qty = Math.max(1, qty + d); refresh(); };
   const wrap = h('div', { class: 'sheet-wrap' });
   const card = h('div', { class: 'sheet', role: 'dialog', 'aria-label': 'Ajouter au panier' },
@@ -311,6 +317,7 @@ function openAddSheet(product, presetUnit, onClose = () => {}) {
       h('span', { class: 'times' }, '×'),
       h('div', { class: 'selectbox' }, select)),
     price,
+    tip,
     h('div', { class: 'sheet-actions' },
       h('button', { class: 'btn cancel', onclick: () => close() }, icon('close', 20), 'Annuler'),
       h('button', { class: 'btn primary', onclick: add }, icon('check', 20), 'Ajouter')));
@@ -329,8 +336,23 @@ function openAddSheet(product, presetUnit, onClose = () => {}) {
     price.replaceChildren(
       h('span', {}, `${eur(net)} / ${u.label.toLowerCase()}`,
         pct ? h('em', { class: promo ? 'promo' : '' }, ` -${pctText(pct)}${promo ? ' promo' : ''}`) : null,
-        u.qty > 1 ? h('small', {}, ` soit ${eur(Math.round(net / u.qty))} / pièce`) : null),
+        u.qty > 1 ? h('small', {}, ` soit ${eur(Math.round(net / u.qty))} / pièce`) : null,
+        u.saving ? h('em', {}, ` ${u.saving.label}`) : null),
       h('b', {}, eur(net * qty)));
+    // Conseil : la quantité approche d'un conditionnement plus avantageux.
+    const next = units.find((x) => x.qty > u.qty && x.baseCents / x.qty < u.baseCents / u.qty);
+    const near = next && pieces < next.qty && pieces >= next.qty * 0.7;
+    const exact = next && pieces % next.qty === 0;
+    tip.hidden = !(near || exact);
+    if (near || exact) {
+      const n = exact ? pieces / next.qty : 1;
+      const gain = next.saving ? ` (${next.saving.label})` : '';
+      tip.replaceChildren(icon('tag', 16),
+        h('span', {}, exact ? `Même quantité en ${n} ${next.label.toLowerCase()}${n > 1 ? 's' : ''} : prix par ${next.label.toLowerCase()}${gain}.`
+          : `Ajoutez ${next.qty - pieces} pièce${next.qty - pieces > 1 ? 's' : ''} pour avoir le prix par ${next.label.toLowerCase()}${gain}.`),
+        h('button', { class: 'btn small', type: 'button', onclick: () => { select.value = next.unit; qty = n; refresh(); } },
+          `Passer à ${n} ${next.label.toLowerCase()}${n > 1 ? 's' : ''}`));
+    }
   }
   function close() {
     wrap.remove();
@@ -461,36 +483,62 @@ function cartView() {
     if (mine !== seq) return;
     // Articles retirés du catalogue entre-temps : on nettoie le panier.
     if (quote.lines.length !== lines.length) {
-      setCart(quote.lines.map((l) => ({ productId: l.productId, unit: l.unit, qty: l.qty })));
+      setCart(quote.lines.map((l) => ({ productId: l.productId, unit: l.unit, qty: l.qty, ...(l.implantationId ? { implantationId: l.implantationId } : {}) })));
     }
+    const same = (x, l) => x.productId === l.productId && x.unit === l.unit && (x.implantationId || null) === (l.implantationId || null);
     const change = (l, qty) => {
       const cart = getCart();
-      const item = cart.find((x) => x.productId === l.productId && x.unit === l.unit);
+      const item = cart.find((x) => same(x, l));
       if (!item) return;
       if (qty < 1) cart.splice(cart.indexOf(item), 1);
       else item.qty = qty;
       setCart(cart);
       refresh();
     };
-    const pctDone = quote.francoCents ? Math.min(100, (quote.totalCents / quote.francoCents) * 100) : 100;
-    const send = h('button', { class: 'btn primary big', disabled: !quote.canOrder, onclick: submit }, icon('check', 22), 'Envoyer la commande');
-    body.replaceChildren(
-      h('div', { class: 'cartlines' }, quote.lines.map((l) => {
-        const input = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.qty, 'aria-label': 'Quantité',
-          onchange: () => change(l, Math.max(1, Math.floor(Number(input.value)) || 1)) });
-        return h('div', { class: 'cartline' },
-          h('div', { class: 'grow', onclick: () => go(`/produit/${l.productId}`) },
-            h('b', {}, l.name),
-            h('small', {}, `Réf. ${l.ref} · ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
-            h('small', {}, `${eur(l.netCents)} / ${l.unitLabel.toLowerCase()}`,
-              l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
+    // Conseil de conditionnement accepté : la ligne passe dans l'unité proposée.
+    const switchUnit = (l) => {
+      const cart = getCart().filter((x) => !same(x, l));
+      const target = cart.find((x) => x.productId === l.productId && x.unit === l.hint.action.unit && !x.implantationId);
+      if (target) target.qty += l.hint.action.qty;
+      else cart.push({ productId: l.productId, unit: l.hint.action.unit, qty: l.hint.action.qty });
+      setCart(cart);
+      refresh();
+    };
+    const row = (l) => {
+      const input = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.qty, 'aria-label': 'Quantité',
+        onchange: () => change(l, Math.max(1, Math.floor(Number(input.value)) || 1)) });
+      return h('div', { class: 'cartitem' },
+        h('div', { class: 'cartline' },
+          h('div', { class: 'grow', onclick: () => go(`/produit/${l.productId}`) }, lineText(l)),
           h('div', { class: 'cartline-right' },
             h('b', {}, eur(l.totalCents)),
             h('div', { class: 'stepper small' },
               h('button', { 'aria-label': l.qty > 1 ? 'Moins' : 'Supprimer', onclick: () => change(l, l.qty - 1) }, icon(l.qty > 1 ? 'minus' : 'trash', 18)),
               input,
-              h('button', { 'aria-label': 'Plus', onclick: () => change(l, l.qty + 1) }, icon('plus', 18)))));
-      })),
+              h('button', { 'aria-label': 'Plus', onclick: () => change(l, l.qty + 1) }, icon('plus', 18))))),
+        l.hint ? h('div', { class: 'hint-line' }, icon('tag', 16), h('span', {}, l.hint.text),
+          h('button', { class: 'btn small', onclick: () => switchUnit(l) }, l.hint.action.label)) : null);
+    };
+    const { loose, plans } = groupLines(quote.lines);
+    const cr = quote.credit;
+    const pctDone = quote.francoCents ? Math.min(100, (quote.totalCents / quote.francoCents) * 100) : 100;
+    const send = h('button', { class: 'btn primary big', disabled: !quote.canOrder, onclick: submit }, icon('check', 22), 'Envoyer la commande');
+    body.replaceChildren(...[
+      cr?.blocked ? h('div', { class: 'card blocked', role: 'alert' }, h('h3', {}, 'Commande impossible pour ce client'), h('p', {}, cr.reason)) : null,
+      loose.length ? h('div', { class: 'cartlines' }, loose.map(row)) : null,
+      // Chaque implantation forme un bloc : on touche son titre pour voir ses articles.
+      ...plans.map((g) => h('details', { class: 'plan', open: openPlans.has(g.id), ontoggle: (e) => (e.target.open ? openPlans.add(g.id) : openPlans.delete(g.id)) },
+        h('summary', {}, icon('ruler', 22),
+          h('div', { class: 'grow' }, h('b', {}, `Implantation ${g.name}`),
+            h('small', {}, `${g.lines.length} référence${g.lines.length > 1 ? 's' : ''}`,
+              g.extraPct ? h('em', {}, ` · remise implantation -${pctText(g.extraPct)}`) : null)),
+          h('b', {}, eur(g.totalCents)), icon('chevron', 18)),
+        h('div', { class: 'cartlines' }, g.lines.map(row)),
+        h('button', { class: 'btn ghost danger', onclick: async () => {
+          if (!(await ask(`Retirer l'implantation ${g.name} du panier ?`, 'Retirer'))) return;
+          setCart(getCart().filter((x) => x.implantationId !== g.id));
+          refresh();
+        } }, icon('trash', 18), "Retirer toute l'implantation"))),
       h('div', { class: 'totals' },
         h('div', { class: 'total' }, h('span', {}, 'Total du panier (HT)'), h('b', {}, eur(quote.totalCents))),
         quote.francoCents
@@ -500,12 +548,14 @@ function cartView() {
                 ? h('p', {}, 'Il manque ', h('b', {}, eur(quote.missingCents)), ` pour atteindre le franco (${eur(quote.francoCents)}).`)
                 : h('p', {}, icon('check', 16), `Franco atteint (${eur(quote.francoCents)}).`),
               quote.missingCents && quote.francoBlocking ? h('p', { class: 'muted' }, "La commande pourra être envoyée une fois le franco atteint.") : null)
-          : null),
+          : null,
+        cr && cr.limitCents != null && !cr.blocked
+          ? h('p', { class: 'muted' }, `Crédit : encours ${eur(cr.outstandingCents)} + cette commande ${eur(cr.orderCents)} TTC, limite ${eur(cr.limitCents)}.`) : null),
       note,
       send,
       h('button', { class: 'btn ghost', onclick: () => go('/scan') }, icon('scan', 18), 'Continuer à scanner'),
-      h('button', { class: 'btn ghost danger', onclick: () => { ask('Vider le panier ?', 'Vider').then((ok) => { if (ok) { setCart([]); refresh(); } }); } }, icon('trash', 18), 'Vider le panier')
-    );
+      h('button', { class: 'btn ghost danger', onclick: () => { ask('Vider le panier ?', 'Vider').then((ok) => { if (ok) { setCart([]); refresh(); } }); } }, icon('trash', 18), 'Vider le panier'),
+    ].filter(Boolean));
 
     async function submit() {
       if (!(await ask(`Envoyer la commande pour ${state.client.name} ?\nTotal : ${eur(quote.totalCents)} HT`, 'Envoyer'))) return;
@@ -525,6 +575,47 @@ function cartView() {
   }
   refresh();
 }
+const openPlans = new Set();
+
+// Lignes d'une commande passée : articles libres, puis une section repliable par implantation.
+function orderBlocks(lines) {
+  const { loose, plans } = groupLines(lines);
+  const row = (l) => h('div', { class: 'cartline' }, h('div', { class: 'grow' }, lineText(l, true)), h('b', {}, eur(l.totalCents)));
+  return [
+    loose.length ? h('div', { class: 'cartlines' }, loose.map(row)) : null,
+    ...plans.map((g) => h('details', { class: 'plan' },
+      h('summary', {}, icon('ruler', 22),
+        h('div', { class: 'grow' }, h('b', {}, `Implantation ${g.name}`),
+          h('small', {}, `${g.lines.length} référence${g.lines.length > 1 ? 's' : ''}`, g.extraPct ? h('em', {}, ` · remise implantation -${pctText(g.extraPct)}`) : null)),
+        h('b', {}, eur(g.totalCents)), icon('chevron', 18)),
+      h('div', { class: 'cartlines' }, g.lines.map(row)))),
+  ].filter(Boolean);
+}
+
+// Texte d'une ligne d'article : nom, conditionnement, prix net et remises appliquées.
+function lineText(l, withQty = false) {
+  return [
+    h('b', {}, l.name),
+    h('small', {}, `Réf. ${l.ref} · ${withQty ? `${l.qty} × ` : ''}${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
+    h('small', {}, `${eur(l.netCents)} / ${l.unitLabel.toLowerCase()}`,
+      l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null,
+      l.extraPct ? h('em', {}, ` -${pctText(l.extraPct)} implantation`) : null),
+  ];
+}
+// Sépare les articles libres des implantations (une implantation = un groupe).
+function groupLines(lines) {
+  const loose = [];
+  const plans = [];
+  for (const l of lines) {
+    if (!l.implantationId) { loose.push(l); continue; }
+    let g = plans.find((x) => x.id === l.implantationId);
+    if (!g) plans.push((g = { id: l.implantationId, name: l.implantationName, extraPct: 0, totalCents: 0, lines: [] }));
+    g.lines.push(l);
+    g.totalCents += l.totalCents;
+    g.extraPct = Math.max(g.extraPct, l.extraPct || 0);
+  }
+  return { loose, plans };
+}
 
 // ---------- Catalogue ----------
 let catalogueQuery = '';
@@ -532,7 +623,7 @@ const UNIT_NAMES = { piece: 'pièce', boite: 'boîte', carton: 'carton', palette
 
 // Compteur − n + relié à une ligne du panier du client en cours.
 function cartStepper(productId, unit, label) {
-  const read = () => getCart().find((l) => l.productId === productId && l.unit === unit)?.qty || 0;
+  const read = () => getCart().find((l) => l.productId === productId && l.unit === unit && !l.implantationId)?.qty || 0;
   const input = h('input', { type: 'number', inputmode: 'numeric', min: 0, value: read(), 'aria-label': `Quantité ${label}`,
     onchange: () => write(Math.max(0, Math.floor(Number(input.value)) || 0)) });
   const box = h('div', { class: 'stepper small' },
@@ -541,7 +632,7 @@ function cartStepper(productId, unit, label) {
     h('button', { type: 'button', 'aria-label': 'Plus', onclick: () => write(read() + 1) }, icon('plus', 18)));
   function write(qty) {
     const cart = getCart();
-    const i = cart.findIndex((l) => l.productId === productId && l.unit === unit);
+    const i = cart.findIndex((l) => l.productId === productId && l.unit === unit && !l.implantationId);
     if (qty < 1) { if (i >= 0) cart.splice(i, 1); }
     else if (i >= 0) cart[i].qty = qty;
     else cart.push({ productId, unit, qty });
@@ -635,7 +726,8 @@ async function productView(id) {
       : h('p', { class: 'muted' }, 'Prix de base. Sélectionnez un client pour voir sa remise.'),
     h('table', { class: 'prices' },
       h('tbody', {}, p.units.map((u) => h('tr', {},
-        h('td', {}, h('b', {}, u.label), u.qty > 1 ? h('small', {}, ` ${u.qty} pièces`) : null),
+        h('td', {}, h('b', {}, u.label), u.qty > 1 ? h('small', {}, ` ${u.qty} pièces`) : null,
+          u.saving ? h('em', { class: 'save' }, u.saving.label) : null),
         h('td', { class: 'num' }, u.netCents !== u.baseCents ? h('s', {}, eur(u.baseCents)) : null),
         h('td', { class: 'num' }, h('b', {}, eur(u.netCents)), u.promo ? h('em', { class: 'promo' }, ' promo') : null))))),
     p.units.length ? null : h('p', { class: 'muted' }, "Prix pas encore défini : cet article ne peut pas être commandé pour l'instant."),
@@ -680,11 +772,7 @@ async function orderView(id) {
         h('p', {}, h('b', {}, c.name), h('br'), 'Livraison : ',
           [hasDel ? c.del_address : c.hq_address, hasDel ? `${c.del_zip} ${c.del_city}` : `${c.hq_zip} ${c.hq_city}`].filter((x) => x.trim()).join(', ') || '—'),
         o.note ? h('p', { class: 'note' }, o.note) : null),
-      h('div', { class: 'cartlines' }, lines.map((l) => h('div', { class: 'cartline' },
-        h('div', { class: 'grow' }, h('b', {}, l.name),
-          h('small', {}, `Réf. ${l.ref} · ${l.qty} × ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
-          h('small', {}, `${eur(l.netCents)}`, l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
-        h('b', {}, eur(l.totalCents))))),
+      ...orderBlocks(lines),
       h('div', { class: 'totals' }, h('div', { class: 'total' }, h('span', {}, 'Total HT'), h('b', {}, eur(o.totalCents))))));
   } catch (e) {
     $view.replaceChildren(empty(e.message));
@@ -702,8 +790,9 @@ async function clientView(id) {
   header('Client', { back: '/clients' });
   $view.replaceChildren(loading());
   let c;
+  let cr;
   try {
-    ({ client: c } = await api(`/clients/${id}`));
+    ({ client: c, credit: cr } = await api(`/clients/${id}`));
   } catch (e) {
     $view.replaceChildren(empty(e.message));
     return fail(e);
@@ -718,6 +807,11 @@ async function clientView(id) {
     h('p', { class: 'muted' }, [c.number && `N° client ${c.number}`, c.vat && `TVA ${c.vat}`].filter(Boolean).join(' · ')),
     h('button', { class: 'btn primary big', onclick: () => { setClient(c); go('/scan'); } }, icon('scan', 22), 'Commander pour ce client'),
     current ? h('p', { class: 'muted center' }, 'Client en cours de commande') : null,
+    cr?.onHold ? h('div', { class: 'card blocked', role: 'alert' }, h('h3', {}, 'Client en attente'),
+      h('p', {}, 'Aucune commande ne peut être passée pour ce client. Contactez le bureau.')) : null,
+    section('Crédit', line('Encours (TTC, non payé)', cr ? eur(cr.outstandingCents) : null),
+      line('Limite de crédit', cr && cr.limitCents != null ? eur(cr.limitCents) : 'Aucune'),
+      line('Disponible', cr && cr.limitCents != null ? eur(Math.max(0, cr.limitCents - cr.outstandingCents)) : null)),
     section('Conditions', line('Remise générale', pctText(c.discountPct)), line('Franco', c.francoCents != null ? eur(c.francoCents) : null)),
     section('Adresses', line('Siège social', addr(c.hq_address, c.hq_zip, c.hq_city)),
       line('Livraison', addr(c.del_address, c.del_zip, c.del_city) || 'Identique au siège social'), line('Horaires', c.hours)),
@@ -843,7 +937,7 @@ async function implantationView() {
       const mine = ++seq;
       let quote;
       try {
-        quote = await api('/quote', { method: 'POST', body: { clientId: state.client.id, lines: draft } });
+        quote = await api('/quote', { method: 'POST', body: { clientId: state.client.id, lines: draft.map((d) => ({ ...d, implantationId: x.id })) } });
       } catch (e) {
         return fail(e);
       }
@@ -860,11 +954,12 @@ async function implantationView() {
       const add = h('button', { class: 'btn primary big', disabled: !n, onclick: () => {
         const cart = getCart();
         for (const l of quote.lines) {
-          const item = cart.find((c) => c.productId === l.productId && c.unit === l.unit);
+          const item = cart.find((c) => c.productId === l.productId && c.unit === l.unit && c.implantationId === x.id);
           if (item) item.qty += l.qty;
-          else cart.push({ productId: l.productId, unit: l.unit, qty: l.qty });
+          else cart.push({ productId: l.productId, unit: l.unit, qty: l.qty, implantationId: x.id });
         }
         setCart(cart);
+        openPlans.add(x.id);
         localStorage.removeItem(key);
         flyToCart(add);
         toast(`${n} référence${n > 1 ? 's' : ''} ajoutée${n > 1 ? 's' : ''} au panier`);
@@ -894,16 +989,15 @@ async function implantationView() {
 
       out.replaceChildren(...[
         h('h2', {}, `${x.name} — ${fmt(x.meters)}`),
+        base.implantation.extraPct ? h('div', { class: 'promo-line' }, icon('tag', 16),
+          `Remise implantation : -${pctText(base.implantation.extraPct)} en plus, sur les articles prévus par le modèle`) : null,
         h('p', { class: 'muted' }, `${n} référence${n > 1 ? 's' : ''} · prix pour ${state.client.name}`,
           same() ? '' : ' · liste modifiée pour ce client'),
         h('div', { class: 'cartlines' }, n ? quote.lines.map((l) => {
           const input = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.qty, 'aria-label': 'Quantité',
             onchange: () => change(l, Math.max(1, Math.floor(Number(input.value)) || 1)) });
           return h('div', { class: 'cartline' },
-            h('div', { class: 'grow' }, h('b', {}, l.name),
-              h('small', {}, `Réf. ${l.ref} · ${l.unitLabel}${l.unitQty > 1 ? ` de ${l.unitQty} pcs` : ''}`),
-              h('small', {}, `${eur(l.netCents)} / ${l.unitLabel.toLowerCase()}`,
-                l.discountPct ? h('em', { class: l.promo ? 'promo' : '' }, ` -${pctText(l.discountPct)}${l.promo ? ' promo' : ''}`) : null)),
+            h('div', { class: 'grow' }, lineText(l)),
             h('div', { class: 'cartline-right' },
               h('b', {}, eur(l.totalCents)),
               h('div', { class: 'stepper small' },
@@ -956,6 +1050,138 @@ async function promosView() {
   }
 }
 
+// ---------- Livraisons : tournée du livreur, signature et photo à la réception ----------
+async function deliveriesView() {
+  header('Livraisons', { back: state.user.role === 'livreur' ? undefined : '/' });
+  $view.replaceChildren(loading());
+  let list;
+  try {
+    ({ deliveries: list } = await api('/deliveries'));
+  } catch (e) {
+    return fail(e);
+  }
+  const provinces = [...new Set(list.map((d) => d.province))].sort((a, b) => a.localeCompare(b, 'fr'));
+  const place = (c) => (c.del_address || c.del_city ? [c.del_address, `${c.del_zip} ${c.del_city}`] : [c.hq_address, `${c.hq_zip} ${c.hq_city}`]).filter((x) => x.trim()).join(', ');
+  $view.replaceChildren(h('div', { class: 'pad' },
+    list.length ? provinces.map((pr) => {
+      const rows = list.filter((d) => d.province === pr).sort((a, b) => place(a.client).localeCompare(place(b.client)));
+      return [h('h3', {}, `${pr} · ${rows.length} livraison${rows.length > 1 ? 's' : ''}`),
+        h('div', { class: 'rows' }, rows.map((d) => h('button', { class: 'row', onclick: () => go(`/livraison/${d.id}`) },
+          h('div', { class: 'grow' }, h('b', {}, d.client.name), h('small', {}, place(d.client)),
+            h('small', {}, `${d.number} · ${d.lineCount} ligne${d.lineCount > 1 ? 's' : ''}`)),
+          statusChip(d), icon('chevron', 18))))];
+    }) : empty('Aucune livraison en attente.')));
+}
+
+async function deliveryView(id) {
+  header('Livraison', { back: '/livraisons' });
+  $view.replaceChildren(loading());
+  let o;
+  let lines;
+  try {
+    ({ order: o, lines } = await api(`/orders/${id}`));
+  } catch (e) {
+    $view.replaceChildren(empty(e.message));
+    return fail(e);
+  }
+  const c = o.client;
+  const del = c.del_address || c.del_city;
+  const tel = (v) => v && 'tel:' + v.replace(/[^+\d]/g, '');
+
+  // Zone de signature au doigt
+  const canvas = h('canvas', { class: 'sigpad', width: 900, height: 330, 'aria-label': 'Zone de signature' });
+  const ctx = canvas.getContext('2d');
+  let signed = false;
+  const clearPad = () => {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    signed = false;
+  };
+  clearPad();
+  const at = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return [(e.clientX - r.left) * (canvas.width / r.width), (e.clientY - r.top) * (canvas.height / r.height)];
+  };
+  let drawing = false;
+  canvas.addEventListener('pointerdown', (e) => { drawing = true; canvas.setPointerCapture(e.pointerId); ctx.beginPath(); ctx.moveTo(...at(e)); e.preventDefault(); });
+  canvas.addEventListener('pointermove', (e) => { if (!drawing) return; ctx.lineTo(...at(e)); ctx.stroke(); signed = true; e.preventDefault(); });
+  canvas.addEventListener('pointerup', () => { drawing = false; });
+  canvas.addEventListener('pointercancel', () => { drawing = false; });
+
+  // Photo prise avec le téléphone, réduite avant l'envoi
+  let photo = '';
+  const preview = h('img', { class: 'proofphoto', alt: 'Photo de la livraison', hidden: true });
+  const file = h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, onchange: async () => {
+    const f = file.files[0];
+    if (!f) return;
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('Photo illisible.'));
+        const reader = new FileReader();
+        reader.onload = () => (el.src = reader.result);
+        reader.onerror = () => reject(new Error('Photo illisible.'));
+        reader.readAsDataURL(f);
+      });
+      const scale = Math.min(1, 1400 / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * scale);
+      cv.height = Math.round(img.height * scale);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      photo = cv.toDataURL('image/jpeg', 0.7);
+      preview.src = photo;
+      preview.hidden = false;
+      photoBtn.lastChild.textContent = 'Reprendre la photo';
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  } });
+  const photoBtn = h('button', { class: 'btn', type: 'button', onclick: () => file.click() }, icon('camera', 20), 'Prendre une photo');
+  const name = h('input', { type: 'text', autocomplete: 'off', placeholder: 'Nom de la personne qui réceptionne' });
+  const error = h('p', { class: 'error', role: 'alert' });
+  const send = h('button', { class: 'btn primary big', onclick: async () => {
+    error.textContent = '';
+    if (!name.value.trim()) return (error.textContent = 'Indiquez le nom de la personne qui reçoit la marchandise.');
+    if (!signed) return (error.textContent = 'Faites signer dans le cadre avant de valider.');
+    send.disabled = true;
+    try {
+      await api(`/deliveries/${o.id}/proof`, { method: 'POST', body: { receivedBy: name.value, signature: canvas.toDataURL('image/png'), photo } });
+      toast('Livraison enregistrée');
+      replacePath('/livraisons');
+    } catch (e) {
+      send.disabled = false;
+      if (e.status === 401) return fail(e);
+      error.textContent = e.message;
+    }
+  } }, icon('check', 22), 'Valider la livraison');
+
+  const pending = ['preparation', 'expediee'].includes(o.status);
+  $view.replaceChildren(h('div', { class: 'pad' }, ...[
+    h('div', { class: 'card' },
+      h('div', { class: 'spread' }, h('h2', {}, c.name), statusChip(o)),
+      h('p', {}, [del ? c.del_address : c.hq_address, del ? `${c.del_zip} ${c.del_city}` : `${c.hq_zip} ${c.hq_city}`].filter((x) => x.trim()).join(', ')),
+      c.hours ? h('p', { class: 'muted' }, `Horaires : ${c.hours}`) : null,
+      c.manager_name || c.phone ? h('p', { class: 'muted' }, 'Contact : ', [c.manager_name, c.manager_phone || c.phone].filter(Boolean).join(' · ')) : null,
+      h('p', { class: 'muted' }, `${o.number} · ${o.province}`),
+      o.note ? h('p', { class: 'note' }, o.note) : null),
+    h('div', { class: 'cartlines' }, lines.map((l) => h('div', { class: 'cartline' },
+      h('div', { class: 'grow' }, h('b', {}, l.name), h('small', {}, `Réf. ${l.ref}${l.implantationName ? ' · implantation ' + l.implantationName : ''}`)),
+      h('b', {}, `${l.qty} × ${l.unitLabel.toLowerCase()}`)))),
+    pending ? h('div', { class: 'card stack' },
+      h('h3', {}, 'Réception de la marchandise'),
+      field('Reçu par', name),
+      h('div', { class: 'spread' }, h('span', { class: 'muted' }, 'Signature'), h('button', { class: 'linkbtn', type: 'button', onclick: clearPad }, 'Effacer')),
+      canvas,
+      file, photoBtn, preview,
+      error, send) : h('div', { class: 'card' }, h('p', {}, 'Cette livraison est déjà enregistrée.')),
+  ].filter(Boolean)));
+}
+
 // ---------- Compte ----------
 function accountView() {
   header('Mon compte', { back: '/' });
@@ -964,7 +1190,7 @@ function accountView() {
     h('div', { class: 'card center' },
       h('div', { class: 'avatar' }, icon('user', 40)),
       h('h2', {}, u.name || u.username),
-      h('p', { class: 'muted' }, `${u.username} · ${u.role === 'admin' ? 'Administrateur' : 'Délégué'}`)),
+      h('p', { class: 'muted' }, `${u.username} · ${{ admin: 'Administrateur', livreur: 'Livreur' }[u.role] || 'Délégué'}`)),
     state.client ? h('div', { class: 'card' }, h('h3', {}, 'Client en cours'), h('p', {}, state.client.name),
       h('button', { class: 'btn ghost', onclick: () => { setClient(null); accountView(); } }, 'Changer de client')) : null,
     h('button', { class: 'btn ghost danger', onclick: async () => {
